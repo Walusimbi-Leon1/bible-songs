@@ -25,33 +25,24 @@
 
 | Field | Value |
 |---|---|
-| Short description | `24/7 continuous streaming of Psalms, worship & Scripture songs` |
+| Short description | `24/7 continuous streaming of Psalms, worship & Scripture songs` (65 chars) |
 | Long description | see below |
 | Privacy Policy | `https://bible-songs.walusimbileon1.workers.dev/privacy` |
 | Terms of Service | `https://bible-songs.walusimbileon1.workers.dev/terms` |
 
-### Long description (~700 chars)
+### Long description (final, ~690 chars)
 
 ```
-🎵 Bible Songs — 24/7 continuous worship streaming, right inside Discord.
+🎵 Bible Songs — 24/7 worship streaming, right inside Discord.
 
-Hit play and the stream never stops. Psalms, worship songs, Scripture-based
-music from the SGSS open library — playing around the clock for you and your
-server.
+Launch the activity and a 3-2-1 countdown starts the stream automatically. Songs flow back-to-back around the clock: Psalms, worship and Scripture music from the SGSS open library.
 
-• Always on: songs flow one after another, non-stop, in sync with everyone
-  in the channel.
-• No pause, no skipping: the shared stream keeps the whole server together.
-  Adjust volume or mute anytime.
-• Fresh rotation: 200+ songs across Psalms, Worship, Christmas, English,
-  Song of Solomon and more.
-• See who's listening: a live dashboard shows every listener in the room.
-• Chat with the room: send messages, reply to anyone, and @mention friends
-  while the music plays.
+• Always on: the shared stream keeps everyone in sync. No pause, no skipping — only volume and mute.
+• Live listener dashboard: see who's listening and the total count in real time.
+• Room chat: message everyone, reply to specific people, and @mention friends while the music plays.
+• 200+ songs across Psalms, Worship, Christmas, English, Song of Solomon and more.
 
-Just launch Bible Songs in a voice channel, and the stream starts itself —
-for minutes, hours, or all day. Perfect for prayer rooms, bible study
-servers, fellowship calls, and quiet background worship.
+Perfect for prayer rooms, Bible study servers, fellowship calls, and quiet background worship. Start it once and let the music carry the room — for minutes, hours, or all day.
 ```
 
 ## 4. Art assets (for portal uploads)
