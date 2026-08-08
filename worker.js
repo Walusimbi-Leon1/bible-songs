@@ -54,6 +54,9 @@ const CHAT_KEEP = 1500;
 
 const DEFAULT_MS = 210000;  // fallback song duration (3.5 min)
 
+// Only these genres remain in the rotation (per Leon, 2026-08-08).
+const ALLOWED_CATEGORIES = new Set(["Psalms", "Song of Solomon"]);
+
 function html(body, status = 200) {
   return new Response(body, {
     status,
@@ -87,7 +90,8 @@ async function getCatalog() {
       category: s?.category || "—",
       url: s?.url || "",
     }))
-    .filter((s) => s.url.startsWith("https://"));
+    .filter((s) => s.url.startsWith("https://"))
+    .filter((s) => ALLOWED_CATEGORIES.has(s.category));
   catalogCache = { at: now, data: songs };
   return songs;
 }
@@ -264,30 +268,100 @@ async function handleStream(request, env, ctx, songId, url) {
   }
 }
 
-// ── Presence (listening dashboard) ───────────────────────────────────────────
+// ── Presence (listening dashboard) + Leaderboard (cumulative hours) ─────────
 const PRESENCE_URL = (id) => `${SOC_DB}/${SOC_NS}/presence/${id}.json`;
 const PRESENCE_ALL = () => `${SOC_DB}/${SOC_NS}/presence.json`;
+const USERS_URL = (uid) => `${SOC_DB}/${SOC_NS}/users/${uid}.json`;
+const USERS_ALL = () => `${SOC_DB}/${SOC_NS}/users.json`;
+const LISTEN_STEP_MAX = 60000; // max ms credited per heartbeat (clients beat every 15s)
+const LB_TOP = 200;            // leaderboard rows returned
+
+async function readUser(uid) {
+  const res = await fetch(USERS_URL(uid));
+  const etag = res.headers.get("etag") || "";
+  const body = await res.json().catch(() => null);
+  return { etag, user: body && typeof body === "object" ? body : null };
+}
+
+// Atomic-ish read-modify-write (If-Match retry) — safe across worker isolates.
+// resetBeat=true → zero the accrual clock (user left); next live beat credits 0.
+async function addListeningTime(uid, deltaMs, name, avatar, resetBeat) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { etag, user } = await readUser(uid);
+    const now = Date.now();
+    const next = {
+      uid,
+      name: cleanStr(name || "Guest", 40),
+      avatar: cleanStr(avatar, 300),
+      seconds: Math.max(0, Number(user?.seconds) || 0) + (resetBeat ? 0 : Math.max(0, deltaMs) / 1000),
+      lastBeat: resetBeat ? 0 : now,
+      lastSeen: now,
+      firstSeen: user?.firstSeen || now,
+    };
+    const res = await fetch(USERS_URL(uid), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...(etag ? { "If-Match": etag } : {}) },
+      body: JSON.stringify(next),
+    });
+    if (res.ok) return next;
+    if (res.status === 412) continue; // concurrent write — retry with fresh read
+    return null;
+  }
+  return null;
+}
 
 async function handlePresence(request) {
   try {
     const body = await request.json().catch(() => ({}));
     const sessionId = String(body.sessionId || "").slice(0, 64);
     if (!sessionId) return json({ error: "missing sessionId" }, 400);
+    const uid = cleanStr(body.uid, 64) || "anon";
+    const name = cleanStr(body.name || "Guest", 40);
+    const avatar = cleanStr(body.avatar, 300);
+    const now = Date.now();
 
     if (body.gone) {
       await fetch(PRESENCE_URL(sessionId), { method: "DELETE" });
+      // Zero the accrual clock so a later return starts fresh (no catch-up).
+      await addListeningTime(uid, 0, name, avatar, true);
       return json({ ok: true });
     }
 
-    const name = String(body.name || "Guest").slice(0, 40);
-    const avatar = String(body.avatar || "").slice(0, 300);
-    const ts = Date.now();
+    // Credit listening time since the last beat (capped to stop abuse).
+    const { user } = await readUser(uid);
+    const lastBeat = Number(user?.lastBeat || 0);
+    const delta = lastBeat ? Math.min(Math.max(now - lastBeat, 0), LISTEN_STEP_MAX) : 0;
+    await addListeningTime(uid, delta, name, avatar);
+
     await fetch(PRESENCE_URL(sessionId), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, avatar, ts }),
+      body: JSON.stringify({ name, avatar, ts: now, uid }),
     });
     return json({ ok: true });
+  } catch (err) {
+    return json({ error: err.message }, 500);
+  }
+}
+
+async function handleLeaderboard() {
+  try {
+    const res = await fetch(USERS_ALL());
+    const raw = (await res.json().catch(() => ({}))) || {};
+    const users = [];
+    for (const [uid, u] of Object.entries(raw)) {
+      if (!u || typeof u !== "object") continue;
+      users.push({
+        uid,
+        name: cleanStr(u.name || "Guest", 40),
+        avatar: cleanStr(u.avatar, 300),
+        seconds: Math.max(0, Number(u.seconds) || 0),
+        firstSeen: Number(u.firstSeen) || 0,
+        lastSeen: Number(u.lastSeen) || 0,
+      });
+    }
+    users.sort((a, b) => b.seconds - a.seconds || (a.firstSeen || 0) - (b.firstSeen || 0));
+    return json({ leaderboard: users.slice(0, LB_TOP), total: users.length });
   } catch (err) {
     return json({ error: err.message }, 500);
   }
@@ -483,6 +557,7 @@ export default {
       if (path === "/api/sync") return await handleSync();
       if (path === "/api/presence" && request.method === "POST") return await handlePresence(request);
       if (path === "/api/listeners") return await handleListeners();
+      if (path === "/api/leaderboard") return await handleLeaderboard();
       if (path === "/api/chat" && request.method === "POST") {
         const r = await handleChatPost(request);
         ctx.waitUntil(pruneChat());

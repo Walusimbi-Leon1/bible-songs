@@ -35,12 +35,13 @@
 ```
 🎵 Bible Songs — 24/7 worship streaming, right inside Discord.
 
-Launch the activity and a 3-2-1 countdown starts the stream automatically. Songs flow back-to-back around the clock: Psalms, worship and Scripture music from the SGSS open library.
+Launch the activity and a 3-2-1 countdown starts the stream automatically. Songs flow back-to-back around the clock: Psalms and Song of Solomon from the SGSS open library.
 
 • Always on: the shared stream keeps everyone in sync. No pause, no skipping — only volume and mute.
+• All-time leaderboard: everyone who ever joined is ranked by cumulative listening hours.
 • Live listener dashboard: see who's listening and the total count in real time.
 • Room chat: message everyone, reply to specific people, and @mention friends while the music plays.
-• 200+ songs across Psalms, Worship, Christmas, English, Song of Solomon and more.
+• 140+ songs from Psalms and the Song of Solomon.
 
 Perfect for prayer rooms, Bible study servers, fellowship calls, and quiet background worship. Start it once and let the music carry the room — for minutes, hours, or all day.
 ```
@@ -67,6 +68,8 @@ https://raw.githubusercontent.com/Walusimbi-Leon1/bible-songs/main/assets/bible-
 - [ ] Open chat → send a message; others see it within ~3s
 - [ ] Reply to a specific message (↩) → shows "Replying to X: …"
 - [ ] @mention a listener → chip renders in the message
+- [ ] Leaderboard shows all-time listeners ranked by listening hours (top 5 + "All" modal)
+- [ ] Your listening hours accumulate across sessions (reopen → total grows)
 - [ ] Relaunch → same rotation continues, presence updates
 - [ ] Privacy / Terms links work in-window
 - [ ] 💛 Support Developer opens donate page in browser (Discord trust prompt)

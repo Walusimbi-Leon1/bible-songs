@@ -38,6 +38,19 @@
 
     <!-- Player -->
     <section id="screen-player" class="screen hidden">
+      <!-- Leaderboard (cumulative listening hours — all-time) -->
+      <div class="lb-card" id="lb-card">
+        <div class="lb-head">
+          <span class="lb-title">🏆 <b>Leaderboard</b></span>
+          <span class="lb-sub" id="lb-sub">…</span>
+          <button class="lb-show" id="lb-show" title="Show all listeners">All ▾</button>
+        </div>
+        <div class="lb-rows" id="lb-rows">
+          <div class="lb-row muted-row"><span class="lb-medal"></span><span class="lb-name">Loading…</span></div>
+        </div>
+        <div class="lb-you hidden" id="lb-you"></div>
+      </div>
+
       <!-- Listening dashboard -->
       <div class="listeners-bar" id="listeners-bar" title="Who's listening right now">
         <span class="lb-icon">🎧</span>
@@ -107,6 +120,17 @@
     <div class="cd-inner">
       <div class="cd-num" id="cd-num">3</div>
       <div class="cd-label">Starting the stream…</div>
+    </div>
+  </div>
+
+  <!-- Leaderboard: full list modal -->
+  <div class="modal hidden" id="lb-modal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span class="modal-title">🏆 All listeners — ranked by listening time</span>
+        <button class="modal-close" id="lb-close" title="Close">✕</button>
+      </div>
+      <div class="modal-body" id="lb-modal-rows"></div>
     </div>
   </div>
 

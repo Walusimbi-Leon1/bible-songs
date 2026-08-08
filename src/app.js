@@ -263,6 +263,15 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ── Header identity ──────────────────────────────────────────────────────────
+function myUid() {
+  let uid = localStorage.getItem("bible-uid");
+  if (!uid) {
+    uid = "g-" + sid();
+    localStorage.setItem("bible-uid", uid);
+  }
+  return uid;
+}
+
 function renderMe(user) {
   const el = $("header-me");
   if (!el) return;
@@ -280,13 +289,13 @@ function renderMe(user) {
     name.textContent = me.name;
     el.appendChild(img);
     el.appendChild(name);
-  } else if (isDiscord) {
-    me = { uid: "", name: "Guest", avatar: "" };
-    el.textContent = "🎧";
   } else {
-    me = { uid: "", name: "Guest-" + sessionId.slice(0, 4), avatar: "" };
+    // Browser / guest — persistent uid so listening hours survive rejoins.
+    me = { uid: myUid(), name: "Guest-" + myUid().slice(-4), avatar: "" };
+    el.textContent = "🎧 " + me.name;
   }
   heartbeat(true);
+  pollLeaderboard();
 }
 
 // ── Listening dashboard (presence) ──────────────────────────────────────────
@@ -295,7 +304,11 @@ async function heartbeat(gone) {
     await fetch("/api/presence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(gone ? { sessionId, gone: true } : { sessionId, name: me.name, avatar: me.avatar }),
+      body: JSON.stringify(
+        gone
+          ? { sessionId, gone: true }
+          : { sessionId, uid: me.uid, name: me.name, avatar: me.avatar }
+      ),
     });
   } catch (e) { /* non-fatal */ }
 }
@@ -328,6 +341,54 @@ async function pollListeners() {
       chip.addEventListener("click", () => mention(l.name, l.sessionId));
       chips.appendChild(chip);
     });
+  } catch (e) { /* non-fatal */ }
+}
+
+// ── Leaderboard (cumulative listening hours) ─────────────────────────────────
+function fmtHours(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  if (s >= 3600) return (s / 3600).toFixed(1).replace(/\.0$/, "") + "h";
+  if (s >= 60) return Math.round(s / 60) + "m";
+  return s + "s";
+}
+
+function lbAvatarHTML(u) {
+  if (u.avatar) return `<img class="lb-av" src="${esc(u.avatar)}" alt="">`;
+  const ch = ((u.name || "?").trim().charAt(0) || "?").toUpperCase();
+  return `<span class="lb-av lb-initial" style="background:${nameColor(u.name || "?")}">${esc(ch)}</span>`;
+}
+
+function lbRowHTML(u, rank) {
+  const medal = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : `<span class="lb-rank">${rank}</span>`;
+  const isMe = u.uid && u.uid === me.uid;
+  return `<div class="lb-row${isMe ? " me" : ""}">
+    <span class="lb-medal">${medal}</span>
+    ${lbAvatarHTML(u)}
+    <span class="lb-name">${esc(u.name)}${isMe ? '<em class="lb-you-tag">you</em>' : ""}</span>
+    <span class="lb-hours">${fmtHours(u.seconds)}</span>
+  </div>`;
+}
+
+function renderLeaderboard(data) {
+  const list = data.leaderboard || [];
+  $("lb-sub").textContent = `${data.total || 0} listeners · all time`;
+  $("lb-rows").innerHTML = list.slice(0, 5).map((u, i) => lbRowHTML(u, i + 1)).join("");
+  $("lb-modal-rows").innerHTML = list.map((u, i) => lbRowHTML(u, i + 1)).join("");
+  const myIdx = list.findIndex((u) => u.uid === me.uid);
+  const youEl = $("lb-you");
+  if (myIdx >= 0 && myIdx >= 5) {
+    youEl.classList.remove("hidden");
+    youEl.innerHTML = `<span>…</span>${lbRowHTML(list[myIdx], myIdx + 1)}`;
+  } else {
+    youEl.classList.add("hidden");
+  }
+}
+
+async function pollLeaderboard() {
+  try {
+    const res = await fetch("/api/leaderboard", { cache: "no-store" });
+    if (!res.ok) return;
+    renderLeaderboard(await res.json());
   } catch (e) { /* non-fatal */ }
 }
 
@@ -608,6 +669,14 @@ async function boot() {
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") heartbeat(true);
     });
+
+    // Leaderboard
+    $("lb-show").addEventListener("click", () => $("lb-modal").classList.remove("hidden"));
+    $("lb-close").addEventListener("click", () => $("lb-modal").classList.add("hidden"));
+    $("lb-modal").addEventListener("click", (e) => {
+      if (e.target === $("lb-modal")) $("lb-modal").classList.add("hidden");
+    });
+    setInterval(pollLeaderboard, 20000);
 
     // Chat wiring
     $("chat-send").addEventListener("click", sendChat);

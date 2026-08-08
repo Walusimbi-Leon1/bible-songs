@@ -8,10 +8,11 @@
 - **Synchronized 24/7 stream (radio model)** — everyone hears the SAME song at the SAME position, browser or Discord. A shared schedule clock in Firebase (epoch + probed per-song durations) drives every client.
 - **Always playing** — songs flow back-to-back; no pause, no skip (only volume + mute, + keyboard ↑/↓/M).
 - **Auto-start** — 3-2-1 countdown on launch, then the stream begins; no start button.
+- **All-time leaderboard** — every user who ever launched/authorized the app is stored and ranked by cumulative listening hours (worker credits real listening time from heartbeat deltas; guests get a persistent localStorage uid).
 - **Current-song display** — title, artist (SGSS), genre only. No playlist, no counters.
 - **Listening dashboard** — live view of who's listening + total count.
 - **Chat with history** — scroll back through old messages, reply to specific messages, @mention listeners.
-- **200+ songs** — Psalms, Worship, Christmas, English, Song of Solomon, 1st Samuel, Thirteen Files (durations probed from MP3 headers, Xing/CBR).
+- **Psalms + Song of Solomon** — 144 songs (128 Psalms, 16 Song of Solomon); other genres removed from the rotation (2026-08-08).
 - **Cloudflare Workers** — catalog + audio proxied same-origin (Discord sandbox CSP-safe), Range + byte-seek supported.
 
 ## Architecture
