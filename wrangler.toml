@@ -1,0 +1,10 @@
+name = "bible-songs"
+main = "dist/worker.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+DISCORD_CLIENT_ID = "REPLACE_WITH_BIBLE_SONGS_CLIENT_ID"
+REDIRECT_URI = "https://bible-songs.walusimbileon1.workers.dev/"
+
+# Secrets (set via `wrangler secret put` or dashboard):
+#   DISCORD_CLIENT_SECRET  — Discord app client secret (never commit!)

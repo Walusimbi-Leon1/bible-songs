@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>🎵 Bible Songs</title>
+<meta name="description" content="Bible Songs — 24/7 continuous streaming of Psalms, worship & Scripture songs, for Discord Activities">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="logo">🎵 Bible <span class="logo-elite">Songs</span></h1>
+      <div id="header-me" class="me-chip"></div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- Loading -->
+    <section id="screen-loading" class="screen">
+      <div class="center-box">
+        <div class="spinner big"></div>
+        <p class="muted" id="loading-msg">Tuning the stream…</p>
+      </div>
+    </section>
+
+    <!-- Error -->
+    <section id="screen-error" class="screen hidden">
+      <div class="center-box">
+        <div class="big-emoji">📻</div>
+        <h2>Can't reach the stream</h2>
+        <p class="muted" id="error-msg">Check your connection and try again.</p>
+        <button class="btn" id="retry-btn">Retry</button>
+      </div>
+    </section>
+
+    <!-- Player -->
+    <section id="screen-player" class="screen hidden">
+      <div class="now-playing">
+        <div class="disc" id="disc">
+          <div class="disc-hole"></div>
+          <div class="disc-label" id="disc-label">🎵</div>
+        </div>
+        <div class="np-info">
+          <p class="np-cat" id="np-cat">—</p>
+          <h2 class="np-title" id="np-title">Loading…</h2>
+          <p class="np-artist" id="np-artist">SGSS</p>
+          <p class="np-count muted" id="np-count">Song 1 of 222</p>
+        </div>
+        <div class="eq" id="eq" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="vol-row">
+          <button class="vol-btn" id="mute-btn" title="Mute / Unmute" aria-label="Mute / Unmute">🔊</button>
+          <input type="range" id="vol-slider" min="0" max="100" value="70" aria-label="Volume">
+          <span class="vol-pct" id="vol-pct">70%</span>
+        </div>
+        <p class="controls-hint">🔒 Always playing — adjust volume or mute anytime</p>
+      </div>
+
+      <div class="song-list" id="song-list">
+        <h3>Now in rotation</h3>
+        <ul id="song-ul"></ul>
+      </div>
+    </section>
+
+    <!-- Autoplay gate (Discord sandbox needs a user gesture to start audio) -->
+    <section id="screen-start" class="screen hidden">
+      <div class="center-box">
+        <div class="big-emoji">🎵</div>
+        <h2>Bible Songs</h2>
+        <p class="muted">24/7 continuous worship &amp; Psalms streaming. You can't pause — only adjust volume.</p>
+        <button class="btn big" id="start-btn">▶ Start Listening</button>
+      </div>
+    </section>
+
+  </main>
+
+  <audio id="audio" preload="auto"></audio>
+
+  <footer class="footer">
+    <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a class="support-link" href="/support">💛 Support Developer</a>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
