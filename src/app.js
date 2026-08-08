@@ -1,42 +1,53 @@
 /**
- * Bible Songs — 24/7 continuous streaming player
+ * Bible Songs — synchronized 24/7 streaming player
  *
- * - Fetches the live song catalog from our worker (/api/songs).
- * - Plays songs back-to-back forever. NO PAUSE — the shared stream keeps
- *   everyone in the channel in sync. Only volume + mute are available.
- * - AUTO-START: on launch a 3-2-1 countdown plays, then the stream starts.
- *   No manual start button. (Browsers may still require one tap for audio —
- *   that shows a compact "tap to enable" screen, not a start gate.)
- * - Listening dashboard: heartbeats presence via /api/presence and polls
- *   /api/listeners to show who's listening + total count.
- * - Chat dashboard: /api/chat with replies to specific messages and direct
- *   @mentions of listeners.
- * - Audio is streamed through our own worker (/stream/<id>), because the
- *   Discord sandbox CSP blocks external hosts; the worker proxies the
- *   GitHub-hosted MP3 with full Range support.
+ * SYNCHRONIZATION (radio model):
+ *  Every client derives the SAME current song + position from the shared
+ *  schedule clock (Firebase epoch + per-song durations):
+ *      elapsed = (now - epoch) % cycleMs  →  walk songIds + durations
+ *  The audio element plays /stream/<id>?start=<offsetSec>, so browsers and
+ *  Discord hear the exact same part of the same song at the same time.
+ *  A 2s tick re-derives the position and corrects drift (seek) or advances
+ *  at song boundaries.
+ *
+ * Other features:
+ *  - Listening dashboard (presence heartbeats → /api/listeners)
+ *  - Chat with history (scroll back via pagination), replies, @mentions
+ *  - Auto-start 3-2-1 countdown (no start button)
+ *  - Volume + mute only (no pause/skip) — keyboard shortcuts ↑/↓/M
  */
 
 import { initDiscord, isDiscord, inDiscordFrame, discordAvatar } from "./discord.js";
 
 const $ = (id) => document.getElementById(id);
 
-let songs = [];          // [{id, title, artist, category, url, thumb}]
-let order = [];          // play order (indices into songs)
-let pos = 0;             // current position in order
+// ── State ────────────────────────────────────────────────────────────────────
+let sched = null;        // { epoch, cycleMs, songIds, byId }
+let cur = null;          // { index, id, offsetMs, durationMs }
+let audioSongId = null;  // what's loaded in the <audio> element
+let lastSwitchAt = 0;    // avoid seek-correction during buffering grace
 let playing = false;
 let muted = false;
-let lastVol = 70;
+let lastVol = Number(localStorage.getItem("bible-vol") || 70);
 
 let me = { uid: "", name: "Guest", avatar: "" };
 let sessionId = "";
-let lastChatTs = Date.now();
-let replyTo = null;      // { id, name, text }
-let listeners = [];      // [{sessionId, name, avatar}]
+let listeners = [];
 let countdownTimer = null;
+
+// Chat state
+let chat = new Map();    // id → message (dedupe)
+let lastChatTs = Date.now();
+let replyTo = null;
+let chatLoaded = false;  // initial batch loaded?
+let chatLoadingOlder = false;
+let chatHasMore = true;
+let oldestKey = "";
+let seenOthers = 0;
 
 const audio = $("audio");
 
-// ── Screen switching ─────────────────────────────────────────────────────────
+// ── Small helpers ────────────────────────────────────────────────────────────
 function showScreen(name) {
   ["loading", "error", "player", "tap"].forEach((s) => {
     const el = $(`screen-${s}`);
@@ -52,88 +63,118 @@ function sid() {
   }
 }
 
-// ── Fetch catalog ────────────────────────────────────────────────────────────
-async function loadSongs() {
-  const res = await fetch("/api/songs", { cache: "no-store" });
-  if (!res.ok) throw new Error("catalog " + res.status);
-  const data = await res.json();
-  songs = (data.songs || []).filter((s) => s && s.id && s.url);
-  if (!songs.length) throw new Error("empty catalog");
-  // Deterministic rotation: keep a stable start, then shuffle lightly.
-  order = songs.map((_, i) => i);
-  // Fisher-Yates with a time seed so every session starts somewhere fresh,
-  // but stays continuous once running.
-  let seed = Date.now() & 0xffff;
-  for (let i = order.length - 1; i > 0; i--) {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    const j = seed % (i + 1);
-    [order[i], order[j]] = [order[j], order[i]];
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
+
+function timeAgo(ts) {
+  const s = Math.max(1, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+
+// ── Sync engine (shared clock) ───────────────────────────────────────────────
+function computeCurrent(now = Date.now()) {
+  if (!sched) return null;
+  const elapsed = ((now - sched.epoch) % sched.cycleMs + sched.cycleMs) % sched.cycleMs;
+  let acc = 0;
+  for (let i = 0; i < sched.songIds.length; i++) {
+    const id = sched.songIds[i];
+    const d = sched.byId[id].durationMs;
+    if (acc + d > elapsed) return { index: i, id, offsetMs: elapsed - acc, durationMs: d };
+    acc += d;
   }
-  renderList();
-  $("np-count").textContent = `Song 1 of ${songs.length}`;
+  const id = sched.songIds[sched.songIds.length - 1];
+  return { index: sched.songIds.length - 1, id, offsetMs: 0, durationMs: sched.byId[id].durationMs };
 }
 
-function currentSong() {
-  return songs[order[pos]];
+async function loadSync() {
+  const res = await fetch("/api/sync", { cache: "no-store" });
+  if (!res.ok) throw new Error("sync " + res.status);
+  const data = await res.json();
+  sched = {
+    epoch: data.epoch,
+    cycleMs: data.cycleMs,
+    songIds: data.rotation.map((s) => s.id),
+    byId: {},
+  };
+  data.rotation.forEach((s) => {
+    sched.byId[s.id] = { id: s.id, title: s.title, artist: s.artist, category: s.category, durationMs: s.durationMs || 210000 };
+  });
+  cur = computeCurrent();
 }
 
-// ── Playback ────────────────────────────────────────────────────────────────
-function playCurrent() {
-  const song = currentSong();
+function remainingInSong(now = Date.now()) {
+  if (!sched) return 0;
+  const target = computeCurrent(now);
+  if (!target) return 0;
+  return target.durationMs - target.offsetMs;
+}
+
+function applyClock(force) {
+  const target = computeCurrent();
+  if (!target) return;
+
+  if (cur && cur.id !== target.id) {
+    // Song boundary — switch.
+    switchTo(target, true);
+  } else {
+    cur = target;
+    if (audioSongId !== target.id) {
+      switchTo(target, false);
+    } else if (force) {
+      const want = target.offsetMs / 1000;
+      const have = audio.currentTime || 0;
+      if (audio.readyState >= 2 && Math.abs(have - want) > 5) {
+        try { audio.currentTime = want; } catch (e) {}
+      }
+    }
+  }
+}
+
+function syncTick() {
+  const target = computeCurrent();
+  if (!target) return;
+  if (cur && cur.id !== target.id) {
+    switchTo(target, true);
+    return;
+  }
+  cur = target;
+  if (audioSongId !== target.id) {
+    switchTo(target, false);
+    return;
+  }
+  // Gentle drift correction on the tick (bigger threshold than force-seek,
+  // and never during the buffering grace after a switch).
+  if (Date.now() - lastSwitchAt < 6000) return;
+  const want = target.offsetMs / 1000;
+  const have = audio.currentTime || 0;
+  if (audio.readyState >= 2 && Math.abs(have - want) > 8) {
+    try { audio.currentTime = want; } catch (e) {}
+  }
+}
+
+function switchTo(target, isBoundary) {
+  cur = target;
+  const song = sched.byId[target.id];
   if (!song) return;
-  const streamUrl = `/stream/${encodeURIComponent(song.id)}`;
+  const offsetSec = Math.max(0, Math.floor(target.offsetMs / 1000));
+  const streamUrl = `/stream/${encodeURIComponent(target.id)}?start=${offsetSec}`;
   if (audio.src !== new URL(streamUrl, location.href).href) {
     audio.src = streamUrl;
   }
+  audioSongId = target.id;
+  lastSwitchAt = Date.now();
+  updateNowPlaying(song, target);
   const p = audio.play();
-  if (p) p.catch(() => { /* autoplay fallback handles this */ });
-  updateNowPlaying(song);
+  if (p) p.catch(() => {});
 }
 
-function updateNowPlaying(song) {
-  $("np-title").textContent = song.title || "Untitled";
-  $("np-artist").textContent = song.artist || "SGSS";
-  $("np-cat").textContent = song.category || "—";
-  $("disc-label").textContent = (song.title || "🎵").slice(0, 2).toUpperCase();
-  $("np-count").textContent = `Song ${pos + 1} of ${songs.length}`;
-  document.title = `🎵 ${song.title || "Bible Songs"}`;
-
-  // Highlight in list
-  const lis = document.querySelectorAll("#song-ul li");
-  lis.forEach((li, i) => li.classList.toggle("playing", i === order[pos]));
-  const active = document.querySelector("#song-ul li.playing");
-  if (active && active.scrollIntoView) {
-    try { active.scrollIntoView({ block: "nearest" }); } catch (e) {}
-  }
-}
-
-function renderList() {
-  const ul = $("song-ul");
-  ul.innerHTML = "";
-  songs.forEach((s, i) => {
-    const li = document.createElement("li");
-    li.innerHTML = `<span class="s-num">${i + 1}</span><span class="s-title"></span><span class="s-cat"></span>`;
-    li.querySelector(".s-title").textContent = s.title || "Untitled";
-    li.querySelector(".s-cat").textContent = s.category || "";
-    ul.appendChild(li);
-  });
-}
-
-// Auto-advance when a song ends → never stops.
-audio.addEventListener("ended", () => {
-  pos = (pos + 1) % order.length;
-  playCurrent();
-});
-
-// If the stream hiccups, recover to the next song after a short grace.
-audio.addEventListener("error", () => {
-  setTimeout(() => {
-    if (!playing) return;
-    pos = (pos + 1) % order.length;
-    playCurrent();
-  }, 2500);
-});
-
+// ── Playback events ──────────────────────────────────────────────────────────
 audio.addEventListener("playing", () => {
   playing = true;
   $("eq").classList.remove("stopped");
@@ -144,43 +185,47 @@ audio.addEventListener("pause", () => {
   $("eq").classList.add("stopped");
   $("disc").classList.add("paused");
 });
-
-// ── Auto-start: 3-2-1 countdown → play ──────────────────────────────────────
-function runCountdown(onDone) {
-  const overlay = $("countdown");
-  const num = $("cd-num");
-  overlay.classList.remove("hidden");
-  let n = 3;
-  num.textContent = String(n);
-  clearInterval(countdownTimer);
-  countdownTimer = setInterval(() => {
-    n -= 1;
-    if (n <= 0) {
-      clearInterval(countdownTimer);
-      overlay.classList.add("hidden");
-      onDone();
-      return;
-    }
-    num.textContent = String(n);
-  }, 1000);
-}
-
-function startStream() {
-  showScreen("player");
-  playCurrent();
-  const p = audio.play();
-  if (p) {
-    p.then(() => showScreen("player")).catch(() => showScreen("tap"));
+audio.addEventListener("ended", () => {
+  // Never rely on 'ended' for advancement — the shared clock decides.
+  // If our duration estimate is shorter than the real song, skip to the
+  // next song at its clock offset; otherwise just resync at the boundary.
+  const remaining = remainingInSong();
+  if (remaining > 8000) {
+    const next = computeCurrent(Date.now() + remaining + 100);
+    if (next && next.id !== cur.id) switchTo(next, true);
+  } else {
+    applyClock(true);
   }
-}
+});
+audio.addEventListener("error", () => {
+  setTimeout(() => {
+    if (!playing) return;
+    const target = computeCurrent(Date.now() + 3000);
+    if (target && (!cur || target.id !== cur.id)) switchTo(target, true);
+    else applyClock(true);
+  }, 2500);
+});
+audio.addEventListener("loadedmetadata", () => {
+  // Seek to the correct offset once metadata is known (covers VBR drift).
+  if (!cur || audioSongId !== cur.id) return;
+  if (Date.now() - lastSwitchAt < 3000) return; // buffering grace
+  const want = cur.offsetMs / 1000;
+  if (audio.readyState >= 1 && Math.abs((audio.currentTime || 0) - want) > 5) {
+    try { audio.currentTime = want; } catch (e) {}
+  }
+});
 
-function wireTapFallback() {
-  // Any tap anywhere starts audio (browser autoplay policy fallback).
-  const enable = () => {
-    audio.play().then(() => showScreen("player")).catch(() => {});
-    document.removeEventListener("pointerdown", enable, true);
-  };
-  document.addEventListener("pointerdown", enable, true);
+function updateNowPlaying(song, target) {
+  $("np-title").textContent = song.title || "Untitled";
+  $("np-artist").textContent = song.artist || "SGSS";
+  $("np-cat").textContent = song.category || "—";
+  $("disc-label").textContent = (song.title || "🎵").slice(0, 2).toUpperCase();
+  document.title = `🎵 ${song.title || "Bible Songs"}`;
+  // Progress ring on the disc (visual, no "Song X of Y" text)
+  if (target && target.durationMs > 0) {
+    const frac = Math.min(1, Math.max(0, target.offsetMs / target.durationMs));
+    $("disc").style.setProperty("--progress", (frac * 360).toFixed(0) + "deg");
+  }
 }
 
 // ── Volume / mute (the ONLY controls) ───────────────────────────────────────
@@ -188,10 +233,19 @@ const volSlider = $("vol-slider");
 const volPct = $("vol-pct");
 const muteBtn = $("mute-btn");
 
+function volIcon(v) {
+  if (muted || v === 0) return "🔇";
+  if (v < 50) return "🔉";
+  return "🔊";
+}
+
 function applyVolume() {
-  audio.volume = muted ? 0 : volSlider.value / 100;
-  volPct.textContent = muted ? "0%" : `${volSlider.value}%`;
-  muteBtn.textContent = muted || Number(volSlider.value) === 0 ? "🔇" : "🔊";
+  const v = muted ? 0 : volSlider.value;
+  audio.volume = v / 100;
+  volPct.textContent = muted ? "0%" : `${v}%`;
+  volSlider.style.setProperty("--fill", `${v}%`);
+  muteBtn.textContent = volIcon(v);
+  localStorage.setItem("bible-vol", String(volSlider.value));
 }
 
 volSlider.addEventListener("input", applyVolume);
@@ -201,8 +255,14 @@ muteBtn.addEventListener("click", () => {
   else volSlider.value = lastVol;
   applyVolume();
 });
+document.addEventListener("keydown", (e) => {
+  if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+  if (e.key === "ArrowUp") { e.preventDefault(); volSlider.value = Math.min(100, Number(volSlider.value) + 5); applyVolume(); }
+  if (e.key === "ArrowDown") { e.preventDefault(); volSlider.value = Math.max(0, Number(volSlider.value) - 5); applyVolume(); }
+  if (e.key === "m" || e.key === "M") { muteBtn.click(); }
+});
 
-// ── Header identity ─────────────────────────────────────────────────────────
+// ── Header identity ──────────────────────────────────────────────────────────
 function renderMe(user) {
   const el = $("header-me");
   if (!el) return;
@@ -226,7 +286,6 @@ function renderMe(user) {
   } else {
     me = { uid: "", name: "Guest-" + sessionId.slice(0, 4), avatar: "" };
   }
-  // Acknowledged presence update
   heartbeat(true);
 }
 
@@ -272,13 +331,7 @@ async function pollListeners() {
   } catch (e) { /* non-fatal */ }
 }
 
-// ── Chat dashboard ──────────────────────────────────────────────────────────
-function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s == null ? "" : String(s);
-  return d.innerHTML;
-}
-
+// ── Chat ─────────────────────────────────────────────────────────────────────
 function mention(name, id) {
   const input = $("chat-input");
   const current = input.value.trim();
@@ -297,6 +350,108 @@ function setReplyChip(r) {
   }
 }
 
+function nameColor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  return `hsl(${hue}, 75%, 68%)`;
+}
+
+function renderChatMessage(m, prepend) {
+  const box = $("chat-msgs");
+  const empty = box.querySelector(".chat-empty");
+  if (empty) empty.remove();
+
+  const mine = m.user && m.user.uid && m.user.uid === me.uid;
+  const div = document.createElement("div");
+  div.className = "msg" + (mine ? " mine" : "");
+  div.dataset.id = m.id;
+
+  let inner = "";
+  if (m.replyTo) {
+    inner += `<div class="msg-reply" data-reply="${esc(m.replyTo.id)}">↩ <b style="color:${nameColor(m.replyTo.name)}">${esc(m.replyTo.name)}</b><span class="rep-snip">${esc(m.replyTo.text)}</span></div>`;
+  }
+  inner += `<div class="msg-head">`;
+  if (m.user && m.user.avatar) inner += `<img class="msg-avatar" src="${esc(m.user.avatar)}" alt="">`;
+  inner += `<span class="msg-name" style="color:${nameColor((m.user && m.user.name) || "Guest")}" data-uid="${esc((m.user && m.user.uid) || "")}" data-sname="${esc((m.user && m.user.name) || "")}">${esc((m.user && m.user.name) || "Guest")}</span>`;
+  if (m.mention) inner += `<span class="msg-mention">@${esc(m.mention.name)}</span>`;
+  inner += `<span class="msg-time">${timeAgo(Number(m.ts) || Date.now())}</span>`;
+  inner += `</div>`;
+  inner += `<div class="msg-text">${esc(m.text)}</div>`;
+  inner += `<div class="msg-actions">
+    <button class="msg-act" data-act="reply" title="Reply">↩</button>
+    <button class="msg-act" data-act="mention" title="Mention">@</button>
+  </div>`;
+
+  div.innerHTML = inner;
+  if (prepend) {
+    box.insertBefore(div, box.firstChild);
+  } else {
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  div.querySelectorAll("[data-act]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.act === "reply") {
+        setReplyChip({ id: m.id, name: (m.user && m.user.name) || "Guest", text: m.text });
+        $("chat-input").focus();
+      } else {
+        mention((m.user && m.user.name) || "Guest", (m.user && m.user.uid) || "");
+      }
+    });
+  });
+  div.querySelectorAll(".msg-name").forEach((nm) => {
+    nm.addEventListener("click", () => mention(nm.dataset.sname, nm.dataset.uid));
+  });
+}
+
+function renderChatList() {
+  const box = $("chat-msgs");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  box.innerHTML = "";
+  const ordered = [...chat.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
+  ordered.forEach((m) => renderChatMessage(m, false));
+  if (atBottom) box.scrollTop = box.scrollHeight;
+  else box.scrollTop = box.scrollHeight; // keep at bottom after initial render
+}
+
+async function loadChatHistory(reset) {
+  if (chatLoadingOlder) return;
+  chatLoadingOlder = true;
+  try {
+    const url = reset
+      ? "/api/chat?limit=200"
+      : `/api/chat?limit=200&before=${encodeURIComponent(oldestKey)}`;
+    const res = await fetch(url, { cache: "no-store" });
+    const data = await res.json();
+    const msgs = data.messages || [];
+    if (reset) {
+      chat.clear();
+      msgs.forEach((m) => chat.set(m.id, m));
+      if (msgs.length) lastChatTs = Math.max(...msgs.map((m) => Number(m.ts) || 0));
+      renderChatList();
+    } else if (msgs.length) {
+      const box = $("chat-msgs");
+      const prevHeight = box.scrollHeight;
+      const prevTop = box.scrollTop;
+      const prevFirst = box.querySelector(".msg")?.dataset.id || "";
+      msgs.forEach((m) => chat.set(m.id, m));
+      // Re-render just the new ones above
+      msgs.forEach((m) => {
+        if (!document.querySelector(`#chat-msgs .msg[data-id="${m.id}"]`)) {
+          renderChatMessage(m, true);
+        }
+      });
+      box.scrollTop = box.scrollTop + (box.scrollHeight - prevHeight);
+    }
+    chatHasMore = data.hasMore;
+    oldestKey = [...chat.values()].sort((a, b) => (a.id < b.id ? -1 : 1))[0]?.id || "";
+    chatLoaded = true;
+  } catch (e) { /* non-fatal */ }
+  chatLoadingOlder = false;
+}
+
 async function sendChat() {
   const input = $("chat-input");
   const text = input.value.trim();
@@ -308,7 +463,6 @@ async function sendChat() {
   };
   if (replyTo) {
     msg.replyTo = { id: replyTo.id, name: replyTo.name, text: replyTo.text };
-    // Convert a leading @mention into a structured mention too.
     const m = text.match(/^@(\S+)\s*/);
     if (m) {
       const target = listeners.find((l) => l.name === m[1] || l.sessionId === m[1]);
@@ -323,101 +477,94 @@ async function sendChat() {
     });
     input.value = "";
     setReplyChip(null);
-    // Optimistic render (the poll will dedupe by id).
-    renderChatMessage(msg);
+    chat.set(msg.id, msg);
     lastChatTs = Math.max(lastChatTs, msg.ts || Date.now());
+    renderChatMessage(msg, false);
     openChat(true);
-  } catch (e) {
-    /* keep text in input on failure */
-  }
-}
-
-function renderChatMessage(m) {
-  const box = $("chat-msgs");
-  const empty = box.querySelector(".chat-empty");
-  if (empty) empty.remove();
-
-  const mine = m.user && m.user.uid && m.user.uid === me.uid;
-  const div = document.createElement("div");
-  div.className = "msg" + (mine ? " mine" : "");
-  div.dataset.id = m.id;
-
-  let inner = "";
-  if (m.replyTo) {
-    inner += `<div class="msg-reply" data-reply="${esc(m.replyTo.id)}">↩ <b>${esc(m.replyTo.name)}</b>: ${esc(m.replyTo.text)}</div>`;
-  }
-  inner += `<div class="msg-head">`;
-  if (m.user && m.user.avatar) inner += `<img class="msg-avatar" src="${esc(m.user.avatar)}" alt="">`;
-  inner += `<span class="msg-name" data-uid="${esc((m.user && m.user.uid) || "")}" data-sname="${esc((m.user && m.user.name) || "")}">${esc((m.user && m.user.name) || "Guest")}</span>`;
-  if (m.mention) inner += `<span class="msg-mention">@${esc(m.mention.name)}</span>`;
-  inner += `</div>`;
-  inner += `<div class="msg-text">${esc(m.text)}</div>`;
-  inner += `<div class="msg-actions">
-    <button class="msg-act" data-act="reply">↩ Reply</button>
-    <button class="msg-act" data-act="mention">@</button>
-  </div>`;
-
-  div.innerHTML = inner;
-  box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
-
-  // Wire actions
-  div.querySelectorAll("[data-act]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      if (btn.dataset.act === "reply") {
-        setReplyChip({ id: m.id, name: (m.user && m.user.name) || "Guest", text: m.text });
-        $("chat-input").focus();
-      } else {
-        mention((m.user && m.user.name) || "Guest", (m.user && m.user.uid) || "");
-      }
-    });
-  });
-  div.querySelectorAll(".msg-name").forEach((nm) => {
-    nm.addEventListener("click", () => {
-      mention(nm.dataset.sname, nm.dataset.uid);
-    });
-  });
+  } catch (e) { /* keep text in input on failure */ }
 }
 
 async function pollChat() {
   try {
-    const res = await fetch(`/api/chat?since=${lastChatTs}`, { cache: "no-store" });
+    const res = await fetch(`/api/chat?limit=50&since=0`, { cache: "no-store" });
     const data = await res.json();
     (data.messages || []).forEach((m) => {
       const ts = Number(m.ts || 0);
-      if (ts <= lastChatTs) return;
-      lastChatTs = ts;
-      if (!document.querySelector(`#chat-msgs .msg[data-id="${m.id}"]`)) {
-        renderChatMessage(m);
+      if (!chat.has(m.id)) {
+        chat.set(m.id, m);
+        lastChatTs = Math.max(lastChatTs, ts);
+        if (chatLoaded) renderChatMessage(m, false);
       }
     });
     const badge = $("chat-badge");
     const open = !$("chat-body").classList.contains("hidden");
-    const unread = countUnread();
+    const unread = chatUnread();
     badge.hidden = open || unread === 0;
     badge.textContent = String(unread);
   } catch (e) { /* non-fatal */ }
 }
 
-function countUnread() {
-  return document.querySelectorAll("#chat-msgs .msg:not(.mine)").length - seenOthers;
+function chatUnread() {
+  let n = 0;
+  chat.forEach((m) => {
+    if (!m._seen && !(m.user && m.user.uid && m.user.uid === me.uid)) n++;
+  });
+  return n;
 }
-let seenOthers = 0;
 
 function openChat(force) {
   const body = $("chat-body");
   const opening = body.classList.contains("hidden");
   if (force && !opening) return;
   body.classList.toggle("hidden");
+  body.classList.toggle("open");
   $("chat-badge").hidden = true;
   if (opening) {
-    seenOthers = document.querySelectorAll("#chat-msgs .msg:not(.mine)").length;
+    chat.forEach((m) => { m._seen = true; });
     $("chat-msgs").scrollTop = $("chat-msgs").scrollHeight;
     $("chat-input").focus();
+    if (!chatLoaded) loadChatHistory(true);
   }
 }
 
-// ── Support link (opens in real browser — Discord sandbox blocks popups) ────
+// ── Auto-start countdown ─────────────────────────────────────────────────────
+function runCountdown(onDone) {
+  const overlay = $("countdown");
+  const num = $("cd-num");
+  overlay.classList.remove("hidden");
+  let n = 3;
+  num.textContent = String(n);
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    n -= 1;
+    if (n <= 0) {
+      clearInterval(countdownTimer);
+      overlay.classList.add("hidden");
+      onDone();
+      return;
+    }
+    num.textContent = String(n);
+  }, 1000);
+}
+
+function startStream() {
+  showScreen("player");
+  applyClock(true);
+  const p = audio.play();
+  if (p) {
+    p.then(() => showScreen("player")).catch(() => showScreen("tap"));
+  }
+}
+
+function wireTapFallback() {
+  const enable = () => {
+    audio.play().then(() => showScreen("player")).catch(() => {});
+    document.removeEventListener("pointerdown", enable, true);
+  };
+  document.addEventListener("pointerdown", enable, true);
+}
+
+// ── Support link ─────────────────────────────────────────────────────────────
 function wireSupport() {
   document.querySelectorAll("a.support-link, a[href='/support']").forEach((a) => {
     a.addEventListener("click", (e) => {
@@ -439,26 +586,24 @@ function wireSupport() {
   });
 }
 
-// ── Boot ────────────────────────────────────────────────────────────────────
+// ── Boot ─────────────────────────────────────────────────────────────────────
 async function boot() {
   sessionId = sid();
   showScreen("loading");
   try {
     const [discordInfo] = await Promise.all([
       initDiscord(),
-      loadSongs(),
+      loadSync(),
     ]);
     renderMe(discordInfo?.user || null);
 
     applyVolume();
     wireSupport();
 
-    // Heartbeats + polling
+    // Presence + listeners
     setInterval(() => heartbeat(false), 15000);
     pollListeners();
     setInterval(pollListeners, 10000);
-    pollChat();
-    setInterval(pollChat, 3000);
     window.addEventListener("beforeunload", () => heartbeat(true));
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") heartbeat(true);
@@ -471,8 +616,19 @@ async function boot() {
     });
     $("chat-toggle").addEventListener("click", () => openChat(false));
     $("chat-reply-x").addEventListener("click", () => setReplyChip(null));
+    const msgsEl = $("chat-msgs");
+    msgsEl.addEventListener("scroll", () => {
+      if (msgsEl.scrollTop < 40 && chatLoaded && chatHasMore) {
+        loadChatHistory(false);
+      }
+    });
+    pollChat();
+    setInterval(pollChat, 3000);
 
-    // AUTO-START: countdown 3-2-1 then play (no manual start button).
+    // Sync clock tick
+    setInterval(() => syncTick(), 2000);
+
+    // AUTO-START: countdown → stream (no manual start button)
     runCountdown(() => {
       startStream();
       wireTapFallback();

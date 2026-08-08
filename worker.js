@@ -5,23 +5,22 @@
  *   /                    → player app (STATIC index.html)
  *   /app.js /style.css /discord.js /vendor/discord-sdk.mjs → static assets
  *   /api/songs           → live song catalog from Firebase (trimmed)
- *   /stream/<songId>     → audio proxy: GitHub release MP3 with Range support
+ *   /api/sync            → SHARED playback schedule + current song/position
+ *   /stream/<songId>?start=<sec> → audio proxy (GitHub MP3, Range + seek)
  *   /api/presence        → POST heartbeat / leave (listening dashboard)
  *   /api/listeners       → GET active listeners (name/avatar + count)
- *   /api/chat            → POST message / GET messages since ts
+ *   /api/chat            → POST message / GET history (paginated)
  *   /api/exchange        → Discord OAuth code → token (confidential client)
  *   /privacy /terms      → legal pages
  *   /support             → 302 → voice-support donate page
  *
- * Design notes:
- *  - The Discord Activity sandbox CSP blocks external hosts, so ALL traffic
- *    (catalog, audio, presence, chat) goes through this worker (same-origin).
- *  - Presence + chat live in Firebase (pop-party-1, public-writable, proven
- *    by the trivia games) under the `bible/` namespace. Clients never talk
- *    to Firebase directly — the worker proxies, so the sandbox CSP is happy.
- *  - GitHub release assets redirect to release-assets.githubusercontent.com
- *    with a signed URL; we always fetch the canonical github.com URL, which
- *    re-signs automatically. Range requests pass through (206).
+ * SYNCHRONIZED STREAMING (radio model):
+ *  A shared schedule lives in Firebase: { epoch, songIds, cycleMs }.
+ *  Every client derives the SAME current song + position from the clock:
+ *      elapsed = (now - epoch) % cycleMs  →  walk songIds + durations
+ *  No per-client shuffles — browser and Discord hear the exact same song
+ *  at the same position. Durations were probed from the MP3s (Xing/CBR)
+ *  and stored in bible/durations.json.
  */
 
 // ── Static assets (inlined at build time) ────────────────────────────────────
@@ -45,13 +44,15 @@ const CONTENT_TYPES = {
 const SONGS_DB = "https://songs-cf1d9-default-rtdb.firebaseio.com/songs.json";
 const CATALOG_TTL = 120; // seconds — re-fetch the live catalog at most this often
 
-// Presence + chat store (public-writable RTDB, proven by the trivia games).
+// Presence + chat + schedule store (public-writable RTDB, proven by trivia games).
 const SOC_DB = "https://pop-party-1-default-rtdb.firebaseio.com";
-const SOC_NS = "bible"; // namespace: {NS}/presence, {NS}/chat
+const SOC_NS = "bible";
 
 const PRESENCE_TTL = 45000; // ms — a heartbeat older than this = gone
-const CHAT_MAX = 250;       // prune chat when it exceeds this many messages
-const CHAT_KEEP = 200;
+const CHAT_MAX = 2000;      // prune chat when it exceeds this many messages
+const CHAT_KEEP = 1500;
+
+const DEFAULT_MS = 210000;  // fallback song duration (3.5 min)
 
 function html(body, status = 200) {
   return new Response(body, {
@@ -100,17 +101,144 @@ async function handleCatalog() {
   }
 }
 
-// ── Audio streaming proxy (Range passthrough) ────────────────────────────────
-async function handleStream(request, env, ctx, songId) {
+// ── Shared schedule (radio clock) ────────────────────────────────────────────
+let schedCache = { at: 0, data: null };
+let durationsCache = { at: 0, data: null };
+let sizeCache = {}; // songId → content-length
+
+async function readJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  return res.json().catch(() => null);
+}
+
+async function getDurations() {
+  const now = Date.now();
+  if (durationsCache.data && now - durationsCache.at < 60000) return durationsCache.data;
+  const data = (await readJson(`${SOC_DB}/${SOC_NS}/durations.json`)) || {};
+  durationsCache = { at: now, data };
+  return data;
+}
+
+async function getSchedule() {
+  const now = Date.now();
+  if (schedCache.data && now - schedCache.at < 15000) return schedCache.data;
+  const data = (await readJson(`${SOC_DB}/${SOC_NS}/schedule.json`)) || null;
+  if (data) schedCache = { at: now, data };
+  return data;
+}
+
+async function ensureSchedule() {
+  const songs = await getCatalog();
+  const hash = songs.map((s) => s.id).sort().join("|");
+  let sched = await getSchedule();
+  if (sched && sched.hash === hash && Array.isArray(sched.songIds) && sched.songIds.length === songs.length) {
+    return sched;
+  }
+  // Rebuild from stored durations (no probing loop — kept light for the sandbox).
+  const durations = await getDurations();
+  const songIds = songs.map((s) => s.id);
+  // Deterministic seeded shuffle from the catalog hash (stable across rebuilds).
+  let seed = 0;
+  for (let i = 0; i < hash.length; i++) seed = (seed * 31 + hash.charCodeAt(i)) >>> 0;
+  for (let i = songIds.length - 1; i > 0; i--) {
+    seed = (seed + 0x6d2b79f5) >>> 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    const j = ((t ^ (t >>> 14)) >>> 0) % (i + 1);
+    [songIds[i], songIds[j]] = [songIds[j], songIds[i]];
+  }
+  const cycleMs = songIds.reduce((a, id) => a + (durations[id] || DEFAULT_MS), 0);
+  const epoch = Date.now() - (Date.now() % 60000) - 60000;
+  sched = { hash, epoch, songIds, cycleMs, count: songIds.length, updatedAt: Date.now() };
+  await fetch(`${SOC_DB}/${SOC_NS}/schedule.json`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(sched),
+  });
+  schedCache = { at: Date.now(), data: sched };
+  return sched;
+}
+
+function schedulePosition(sched, durations, now) {
+  const elapsed = ((now - sched.epoch) % sched.cycleMs + sched.cycleMs) % sched.cycleMs;
+  let acc = 0;
+  for (let i = 0; i < sched.songIds.length; i++) {
+    const id = sched.songIds[i];
+    const d = durations[id] || DEFAULT_MS;
+    if (acc + d > elapsed) {
+      return { index: i, id, offsetMs: elapsed - acc, durationMs: d };
+    }
+    acc += d;
+  }
+  const id = sched.songIds[sched.songIds.length - 1];
+  return { index: sched.songIds.length - 1, id, offsetMs: 0, durationMs: durations[id] || DEFAULT_MS };
+}
+
+async function handleSync() {
+  try {
+    const [sched, durations, songs] = await Promise.all([ensureSchedule(), getDurations(), getCatalog()]);
+    const now = Date.now();
+    const cur = schedulePosition(sched, durations, now);
+    const byId = {};
+    songs.forEach((s) => { byId[s.id] = { id: s.id, title: s.title, artist: s.artist, category: s.category }; });
+    const rotation = sched.songIds.map((id) => ({
+      ...(byId[id] || { id, title: "Untitled", artist: "SGSS", category: "—" }),
+      durationMs: durations[id] || DEFAULT_MS,
+    }));
+    return json({
+      epoch: sched.epoch,
+      cycleMs: sched.cycleMs,
+      now,
+      current: { ...cur, song: byId[cur.id] || null },
+      rotation,
+      count: sched.songIds.length,
+    });
+  } catch (err) {
+    return json({ error: err.message }, 502);
+  }
+}
+
+// ── Audio streaming proxy (Range passthrough + start-offset seek) ────────────
+async function getSize(songUrl) {
+  const key = songUrl;
+  if (sizeCache[key]) return sizeCache[key];
+  try {
+    const head = await fetch(songUrl, { method: "HEAD", redirect: "follow" });
+    const size = Number(head.headers.get("content-length")) || 0;
+    if (size) sizeCache[key] = size;
+    return size;
+  } catch (e) {
+    return 0;
+  }
+}
+
+async function handleStream(request, env, ctx, songId, url) {
   try {
     const songs = await getCatalog();
     const song = songs.find((s) => s.id === decodeURIComponent(songId));
     if (!song) return json({ error: "song not found" }, 404);
 
+    const durations = await getDurations();
+    const durationMs = durations[song.id] || DEFAULT_MS;
+
+    let range = request.headers.get("Range") || "";
+    // Seek support: ?start=<seconds> → byte offset (duration ratio).
+    const startSec = Number(url.searchParams.get("start") || 0);
+    if (!range && startSec > 0) {
+      const size = await getSize(song.url);
+      if (size > 0) {
+        const ratio = Math.min(1, Math.max(0, startSec / (durationMs / 1000)));
+        const startByte = Math.round(ratio * (size - 1));
+        range = `bytes=${startByte}-`;
+      }
+    }
+
     const upstream = await fetch(song.url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (compatible; BibleSongs/1.0)",
-        Range: request.headers.get("Range") || "",
+        Range: range,
         Accept: "audio/*,*/*;q=0.8",
       },
     });
@@ -175,7 +303,6 @@ async function handleListeners() {
       if (!p || typeof p !== "object") continue;
       const ts = Number(p.ts) || 0;
       if (now - ts > PRESENCE_TTL) {
-        // Stale — sweep it (best-effort; caller's heartbeat re-adds if alive).
         fetch(PRESENCE_URL(sessionId), { method: "DELETE" }).catch(() => {});
         continue;
       }
@@ -185,7 +312,6 @@ async function handleListeners() {
         avatar: String(p.avatar || "").slice(0, 300),
       });
     }
-    // Stable ordering: oldest heartbeat first.
     active.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
     return json({ listeners: active, count: active.length });
   } catch (err) {
@@ -193,9 +319,9 @@ async function handleListeners() {
   }
 }
 
-// ── Chat ─────────────────────────────────────────────────────────────────────
+// ── Chat (history + pagination) ──────────────────────────────────────────────
 const CHAT_URL = (id) => `${SOC_DB}/${SOC_NS}/chat/${id}.json`;
-const CHAT_ALL = () => `${SOC_DB}/${SOC_NS}/chat.json`;
+const CHAT_ALL = (params) => `${SOC_DB}/${SOC_NS}/chat.json${params}`;
 
 function cleanStr(v, max) {
   return String(v || "").slice(0, max);
@@ -233,7 +359,6 @@ async function handleChatPost(request) {
       };
     }
 
-    // Idempotent PUT: client-generated keys mean retries never duplicate.
     await fetch(CHAT_URL(id), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -248,29 +373,63 @@ async function handleChatPost(request) {
 async function handleChatGet(request) {
   try {
     const url = new URL(request.url);
-    const since = Number(url.searchParams.get("since") || 0);
-    const res = await fetch(CHAT_ALL());
-    const raw = (await res.json().catch(() => ({}))) || {};
+    const limit = Math.min(300, Math.max(1, Number(url.searchParams.get("limit") || 200)));
+    const before = cleanStr(url.searchParams.get("before"), 80);
 
-    const keys = Object.keys(raw).sort(); // keys are timestamps → chronological
-    if (keys.length > CHAT_MAX) {
-      // Prune oldest messages beyond CHAT_KEEP.
-      const excess = keys.length - CHAT_KEEP;
-      await Promise.all(
-        keys.slice(0, Math.min(excess, 50)).map((k) =>
-          fetch(CHAT_URL(k), { method: "DELETE" }).catch(() => {}),
-        ),
-      );
+    // Firebase REST: keys are `${ts}-${rand}` → lexicographic order = chronological.
+    // Fetch limit+1 (or limit+2 with endAt, which is inclusive) so we can
+    // detect "hasMore" reliably.
+    let params;
+    if (before) {
+      params = `?orderBy="$key"&endAt="${before}"&limitToLast=${limit + 2}`;
+    } else {
+      params = `?orderBy="$key"&limitToLast=${limit + 1}`;
     }
 
-    const messages = keys
+    const res = await fetch(CHAT_ALL(params));
+    const raw = (await res.json().catch(() => ({}))) || {};
+    const keys = Object.keys(raw).sort();
+
+    // Total size check for pruning (separate cheap call is not needed — we
+    // prune lazily on POST by counting; here we just paginate).
+    let messages = keys
+      .filter((k) => !before || k < before)
       .map((k) => ({ id: k, ...(raw[k] || {}) }))
-      .filter((m) => Number(m.ts || 0) > since)
-      .slice(-100);
-    return json({ messages, count: messages.length });
+      .filter((m) => m && typeof m === "object")
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+
+    const hasMore = messages.length > limit;
+    if (hasMore) messages = messages.slice(messages.length - limit);
+
+    // Prune: keep the newest CHAT_KEEP (best-effort, throttled).
+    const totalRes = await fetch(`${SOC_DB}/${SOC_NS}/chat.json?orderBy="$key"&limitToLast=1&shallow=true`).catch(() => null);
+    if (totalRes && totalRes.ok) {
+      const newest = await totalRes.json().catch(() => null);
+      if (newest) {
+        const newestKey = Object.keys(newest)[0];
+        // Approximate count via a range query is costly; skip aggressive prune.
+        void newestKey;
+      }
+    }
+
+    return json({ messages, count: messages.length, hasMore });
   } catch (err) {
     return json({ error: err.message }, 500);
   }
+}
+
+async function pruneChat() {
+  // Keep newest CHAT_KEEP; delete older (batched).
+  try {
+    const res = await fetch(`${SOC_DB}/${SOC_NS}/chat.json?orderBy="$key"&limitToLast=${CHAT_MAX + 1}`);
+    const raw = await res.json().catch(() => null);
+    if (!raw) return;
+    const keys = Object.keys(raw).sort();
+    if (keys.length <= CHAT_MAX) return;
+    const excess = keys.length - CHAT_KEEP;
+    const toDelete = keys.slice(0, Math.min(excess, 100));
+    await Promise.all(toDelete.map((k) => fetch(CHAT_URL(k), { method: "DELETE" }).catch(() => {})));
+  } catch (e) { /* best-effort */ }
 }
 
 // ── Discord OAuth exchange (confidential client) ─────────────────────────────
@@ -284,9 +443,6 @@ async function handleExchange(request, env) {
     const secret = env.DISCORD_CLIENT_SECRET;
     if (!clientId || !secret) return json({ error: "server not configured" }, 500);
 
-    // The SDK's authorize is a native command — Discord's client uses the
-    // activity URL as redirect_uri. The client echoes it back so we match
-    // EXACTLY what the OAuth request used.
     const redirectUri = body.redirect_uri || env.REDIRECT_URI || new URL(request.url).origin + "/";
 
     const res = await fetch("https://discord.com/api/oauth2/token", {
@@ -324,13 +480,18 @@ export default {
     try {
       if (path === "/api/exchange" && request.method === "POST") return await handleExchange(request, env);
       if (path === "/api/songs") return await handleCatalog();
+      if (path === "/api/sync") return await handleSync();
       if (path === "/api/presence" && request.method === "POST") return await handlePresence(request);
       if (path === "/api/listeners") return await handleListeners();
-      if (path === "/api/chat" && request.method === "POST") return await handleChatPost(request);
+      if (path === "/api/chat" && request.method === "POST") {
+        const r = await handleChatPost(request);
+        ctx.waitUntil(pruneChat());
+        return r;
+      }
       if (path === "/api/chat" && request.method === "GET") return await handleChatGet(request);
       if (path.startsWith("/stream/")) {
         const songId = path.slice("/stream/".length);
-        return await handleStream(request, env, ctx, songId);
+        return await handleStream(request, env, ctx, songId, url);
       }
       if (path === "/privacy") return html(STATIC["privacy.html"]);
       if (path === "/terms") return html(STATIC["terms.html"]);

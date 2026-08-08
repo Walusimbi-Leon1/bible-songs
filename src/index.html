@@ -54,7 +54,6 @@
           <p class="np-cat" id="np-cat">—</p>
           <h2 class="np-title" id="np-title">Loading…</h2>
           <p class="np-artist" id="np-artist">SGSS</p>
-          <p class="np-count muted" id="np-count">Song 1 of 222</p>
         </div>
         <div class="eq" id="eq" aria-hidden="true">
           <span></span><span></span><span></span><span></span><span></span>
@@ -73,8 +72,8 @@
       <!-- Chat dashboard -->
       <div class="chat-card" id="chat-card">
         <div class="chat-head" id="chat-toggle">
-          <span>💬 Chat</span>
-          <span class="chat-badge" id="chat-badge" hidden>0</span>
+          <span class="chat-title"><span class="chat-ico">💬</span> Chat <span class="chat-dot"></span></span>
+          <span class="chat-right"><span class="chat-badge" id="chat-badge" hidden>0</span><span class="chat-chev">▾</span></span>
         </div>
         <div class="chat-body hidden" id="chat-body">
           <div class="chat-msgs" id="chat-msgs">
@@ -86,14 +85,9 @@
           </div>
           <div class="chat-compose">
             <input type="text" id="chat-input" placeholder="Message… (@name to mention)" maxlength="500" autocomplete="off">
-            <button class="btn small" id="chat-send">Send</button>
+            <button class="btn small" id="chat-send" title="Send">➤</button>
           </div>
         </div>
-      </div>
-
-      <div class="song-list" id="song-list">
-        <h3>Now in rotation</h3>
-        <ul id="song-ul"></ul>
       </div>
     </section>
 

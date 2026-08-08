@@ -5,18 +5,19 @@
 **Live:** https://bible-songs.walusimbileon1.workers.dev
 
 ## Features
-- **Always playing** — songs stream back-to-back 24/7; no pause, no skip (everyone in the channel stays in sync).
+- **Synchronized 24/7 stream (radio model)** — everyone hears the SAME song at the SAME position, browser or Discord. A shared schedule clock in Firebase (epoch + probed per-song durations) drives every client.
+- **Always playing** — songs flow back-to-back; no pause, no skip (only volume + mute, + keyboard ↑/↓/M).
 - **Auto-start** — 3-2-1 countdown on launch, then the stream begins; no start button.
+- **Current-song display** — title, artist (SGSS), genre only. No playlist, no counters.
 - **Listening dashboard** — live view of who's listening + total count.
-- **Chat** — messages, replies to specific messages, and direct @mentions.
-- **Volume & mute only** — the sole audio controls, as designed.
-- **200+ songs** — Psalms, Worship, Christmas, English, Song of Solomon, 1st Samuel, Thirteen Files.
-- **Cloudflare Workers** — catalog + audio proxied same-origin (Discord sandbox CSP-safe), Range-supported streaming.
+- **Chat with history** — scroll back through old messages, reply to specific messages, @mention listeners.
+- **200+ songs** — Psalms, Worship, Christmas, English, Song of Solomon, 1st Samuel, Thirteen Files (durations probed from MP3 headers, Xing/CBR).
+- **Cloudflare Workers** — catalog + audio proxied same-origin (Discord sandbox CSP-safe), Range + byte-seek supported.
 
 ## Architecture
 ```
 src/            client (index.html, app.js, style.css, discord.js, vendored SDK)
-worker.js       routes: / (app), /api/songs (live Firebase catalog),
+worker.js       routes: / (app), /api/sync (shared schedule clock), /api/songs,
                 /stream/<id> (GitHub MP3 proxy w/ Range), /api/exchange (Discord OAuth),
                 /privacy /terms /support
 build.js        inlines src/* → dist/worker.js
