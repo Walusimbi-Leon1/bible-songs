@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1408" height="768" viewBox="0 0 1408 768">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1b2450"/>
+      <stop offset="50%" stop-color="#0b1020"/>
+      <stop offset="100%" stop-color="#2a1b4a"/>
+    </linearGradient>
+    <linearGradient id="disc" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="50%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="rgba(99,102,241,0.4)"/>
+      <stop offset="100%" stop-color="rgba(99,102,241,0)"/>
+    </radialGradient>
+  </defs>
+  <rect width="1408" height="768" fill="url(#bg)"/>
+  <rect width="1408" height="768" fill="url(#glow)"/>
+  <!-- Vinyl disc left -->
+  <g transform="translate(430,384)">
+    <circle r="210" fill="url(#disc)" opacity="0.2"/>
+    <circle r="175" fill="url(#disc)"/>
+    <circle r="175" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="2.5"/>
+    <circle r="148" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="2"/>
+    <circle r="120" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="2"/>
+    <circle r="92" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="2"/>
+    <circle r="64" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="2"/>
+    <circle r="42" fill="#0b1020"/>
+    <text x="0" y="15" text-anchor="middle" font-family="Georgia, serif" font-weight="bold" font-size="38" fill="#fff">🎵</text>
+  </g>
+  <!-- Equalizer bars -->
+  <g transform="translate(430,640)">
+    <rect x="-54" y="-30" width="16" height="30" rx="8" fill="#ffd76a"/>
+    <rect x="-28" y="-46" width="16" height="46" rx="8" fill="#8b5cf6"/>
+    <rect x="0"   y="-60" width="16" height="60" rx="8" fill="#6366f1"/>
+    <rect x="28"  y="-42" width="16" height="42" rx="8" fill="#8b5cf6"/>
+    <rect x="54"  y="-24" width="16" height="24" rx="8" fill="#ffd76a"/>
+  </g>
+  <!-- Right text block -->
+  <g transform="translate(880,300)">
+    <text x="0" y="0" font-family="Georgia, serif" font-weight="bold" font-size="96" fill="#fff">Bible Songs</text>
+    <text x="4" y="60" font-family="sans-serif" font-size="30" letter-spacing="6" fill="rgba(255,255,255,0.6)">24/7 CONTINUOUS WORSHIP STREAM</text>
+    <g transform="translate(0,110)">
+      <rect x="-14" y="-8" width="330" height="4" rx="2" fill="url(#disc)"/>
+    </g>
+    <text x="4" y="160" font-family="sans-serif" font-size="24" fill="rgba(255,255,255,0.75)">Psalms · Worship · Christmas · Scripture songs</text>
+    <text x="4" y="200" font-family="sans-serif" font-size="20" fill="rgba(255,255,255,0.45)">Play inside Discord — no pause, just volume. Always on.</text>
+  </g>
+</svg>
