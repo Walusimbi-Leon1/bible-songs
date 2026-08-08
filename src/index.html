@@ -38,6 +38,13 @@
 
     <!-- Player -->
     <section id="screen-player" class="screen hidden">
+      <!-- Listening dashboard -->
+      <div class="listeners-bar" id="listeners-bar" title="Who's listening right now">
+        <span class="lb-icon">🎧</span>
+        <span class="lb-count" id="lb-count">0 listening</span>
+        <span class="lb-chips" id="lb-chips"></span>
+      </div>
+
       <div class="now-playing">
         <div class="disc" id="disc">
           <div class="disc-hole"></div>
@@ -63,23 +70,51 @@
         <p class="controls-hint">🔒 Always playing — adjust volume or mute anytime</p>
       </div>
 
+      <!-- Chat dashboard -->
+      <div class="chat-card" id="chat-card">
+        <div class="chat-head" id="chat-toggle">
+          <span>💬 Chat</span>
+          <span class="chat-badge" id="chat-badge" hidden>0</span>
+        </div>
+        <div class="chat-body hidden" id="chat-body">
+          <div class="chat-msgs" id="chat-msgs">
+            <p class="chat-empty muted">Be the first to say something 🙌</p>
+          </div>
+          <div class="chat-reply-chip hidden" id="chat-reply-chip">
+            <span id="chat-reply-text">Replying…</span>
+            <button class="chip-x" id="chat-reply-x" title="Cancel reply">✕</button>
+          </div>
+          <div class="chat-compose">
+            <input type="text" id="chat-input" placeholder="Message… (@name to mention)" maxlength="500" autocomplete="off">
+            <button class="btn small" id="chat-send">Send</button>
+          </div>
+        </div>
+      </div>
+
       <div class="song-list" id="song-list">
         <h3>Now in rotation</h3>
         <ul id="song-ul"></ul>
       </div>
     </section>
 
-    <!-- Autoplay gate (Discord sandbox needs a user gesture to start audio) -->
-    <section id="screen-start" class="screen hidden">
+    <!-- Autoplay fallback (browser policy only — not a "start" gate) -->
+    <section id="screen-tap" class="screen hidden">
       <div class="center-box">
-        <div class="big-emoji">🎵</div>
-        <h2>Bible Songs</h2>
-        <p class="muted">24/7 continuous worship &amp; Psalms streaming. You can't pause — only adjust volume.</p>
-        <button class="btn big" id="start-btn">▶ Start Listening</button>
+        <div class="big-emoji">🔊</div>
+        <h2>Tap to start the stream</h2>
+        <p class="muted">Your browser blocks auto-playing audio. One tap and it plays 24/7.</p>
       </div>
     </section>
 
   </main>
+
+  <!-- Countdown overlay (auto-start: 3, 2, 1) -->
+  <div id="countdown" class="countdown hidden">
+    <div class="cd-inner">
+      <div class="cd-num" id="cd-num">3</div>
+      <div class="cd-label">Starting the stream…</div>
+    </div>
+  </div>
 
   <audio id="audio" preload="auto"></audio>
 

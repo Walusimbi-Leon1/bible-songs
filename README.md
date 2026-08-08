@@ -6,7 +6,10 @@
 
 ## Features
 - **Always playing** — songs stream back-to-back 24/7; no pause, no skip (everyone in the channel stays in sync).
-- **Volume & mute only** — the sole controls, as designed.
+- **Auto-start** — 3-2-1 countdown on launch, then the stream begins; no start button.
+- **Listening dashboard** — live view of who's listening + total count.
+- **Chat** — messages, replies to specific messages, and direct @mentions.
+- **Volume & mute only** — the sole audio controls, as designed.
 - **200+ songs** — Psalms, Worship, Christmas, English, Song of Solomon, 1st Samuel, Thirteen Files.
 - **Cloudflare Workers** — catalog + audio proxied same-origin (Discord sandbox CSP-safe), Range-supported streaming.
 

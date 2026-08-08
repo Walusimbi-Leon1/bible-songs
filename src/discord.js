@@ -7,17 +7,17 @@
  *  - authorize() handles BOTH result shapes:
  *      { access_token } → Public Client / PKCE → authenticate() directly
  *      { code }         → confidential → /api/exchange → authenticate()
+ *  - The SDK's authorize is a native command: Discord's client builds the
+ *    OAuth URL and uses the ACTIVITY URL as redirect_uri, so our token
+ *    exchange sends location.origin + location.pathname to match.
  *  - authenticate({ access_token }) returns { user }; getUser() requires
  *    an explicit id in SDK 2.5.0 and fails with "child id is required".
- *  - channelId comes free from sdk.channelId (URL params Discord adds).
  */
 
 import { DiscordSDK } from "./vendor/discord-sdk.mjs";
 
-// Discord Application Client ID — Discord injects ?client_id= into the
-// Activity iframe URL, so the URL param wins. This constant is the
-// fallback for direct links. (Placeholder until Leon provides the app.)
-const CLIENT_ID = "REPLACE_WITH_BIBLE_SONGS_CLIENT_ID";
+// Discord Application Client ID (Bible Songs — provided by Leon 2026-08-08)
+const CLIENT_ID = "1535729840827670655";
 
 export let discordSdk = null;
 export let isDiscord = false;
@@ -49,10 +49,6 @@ export async function initDiscord() {
   try {
     const params = new URLSearchParams(window.location.search);
     const clientId = params.get("client_id") || CLIENT_ID;
-    if (!clientId || clientId.startsWith("REPLACE_WITH_")) {
-      console.warn("[discord] no real client_id — running as guest");
-      return { isDiscord: true, channelId: params.get("channel_id") || "lobby", user: null };
-    }
     discordSdk = new DiscordSDK(clientId);
     await withTimeout(discordSdk.ready(), 8000, "sdk.ready");
     isDiscord = true;
@@ -83,10 +79,11 @@ async function runAuthorize(clientId) {
   if (result.access_token) {
     accessToken = result.access_token;
   } else if (result.code) {
+    const redirectUri = window.location.origin + window.location.pathname;
     const exchange = await fetch("/api/exchange", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: result.code, client_id: clientId }),
+      body: JSON.stringify({ code: result.code, client_id: clientId, redirect_uri: redirectUri }),
     });
     const data = await exchange.json().catch(() => ({}));
     accessToken = data.access_token || null;

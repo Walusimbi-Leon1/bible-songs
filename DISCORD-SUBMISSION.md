@@ -2,35 +2,24 @@
 
 **Live URL:** https://bible-songs.walusimbileon1.workers.dev
 **Repo:** https://github.com/Walusimbi-Leon1/bible-songs
+**Client ID:** 1535729840827670655 *(wired in — `src/discord.js` + `wrangler.toml`)*
+**Client Secret:** set as Worker secret `DISCORD_CLIENT_SECRET` *(never committed)*
+**Auth redirect URI:** `https://bible-songs.walusimbileon1.workers.dev` — register in the portal
 
-## 1. Discord Application (waiting on Leon for client ID + secret)
+## 1. Portal configuration (verify these are set)
 
-Create the app in https://discord.com/developers/applications:
+1. **General Information**: name, icon, short description `24/7 continuous streaming of Psalms, worship & Scripture songs`, tags `music`, `streaming`.
+2. **OAuth2 → General**: add redirect `https://bible-songs.walusimbileon1.workers.dev`.
+3. **Installation Contexts**: Guild Install + User Install checked.
+4. **Activities / Embedded App SDK**: Activities enabled (required to launch in voice channels).
+5. **Rich Presence / artwork**: cover + banner (raw URLs below).
 
-1. **New Application** → name it **Bible Songs** (or "Bible" — your call).
-2. **General Information**:
-   - Description (short, ≤100 chars): `24/7 continuous streaming of Psalms, worship & Scripture songs`
-   - Tags: `music`, `streaming`
-   - App icon: use `assets/bible-songs-cover.png` (once added)
-3. **OAuth2 → General**:
-   - Add redirect: `https://bible-songs.walusimbileon1.workers.dev/`
-4. **Installation Contexts**: check **Guild Install** + **User Install**.
-5. **Activities / Embedded App SDK** (left sidebar): enable **Activities**.
-   - Entry point command auto-creates.
-6. Send the **Client ID** + **Client Secret** to LA5.
+## 2. Code status
 
-## 2. Enable in the code (once creds arrive)
-
-`src/discord.js`:
-```js
-const CLIENT_ID = "REPLACE_WITH_BIBLE_SONGS_CLIENT_ID";
-```
-→ replace with the real client ID. Then:
-
-```bash
-CF_API_TOKEN=... DISCORD_CLIENT_ID=<real> DISCORD_CLIENT_SECRET=<real> bash deploy.sh
-```
-(deploy.sh sets both as Worker secrets and redeploys.)
+- Client ID baked into `src/discord.js` + `wrangler.toml [vars]`.
+- Client secret stored as Worker secret (set 2026-08-08, verified — Discord returns `invalid_grant` for fake codes, meaning the secret is bound and validating).
+- `/api/exchange` uses the SDK's native redirect_uri (`location.origin + location.pathname`) so the token exchange matches Discord's embedded flow exactly.
+- Users joining via Discord get the authorize prompt → names + avatars appear in the header, listening dashboard, and chat.
 
 ## 3. Portal fields (paste these)
 
@@ -56,18 +45,18 @@ server.
   Adjust volume or mute anytime.
 • Fresh rotation: 200+ songs across Psalms, Worship, Christmas, English,
   Song of Solomon and more.
+• See who's listening: a live dashboard shows every listener in the room.
+• Chat with the room: send messages, reply to anyone, and @mention friends
+  while the music plays.
 
-Just launch Bible Songs in a voice channel, tap start, and let the music
-carry the room — for minutes, hours, or all day. Perfect for prayer rooms,
-bible study servers, fellowship calls, and quiet background worship.
-
-Volume controls are always available. The stream is served through
-Cloudflare for fast, reliable playback everywhere.
+Just launch Bible Songs in a voice channel, and the stream starts itself —
+for minutes, hours, or all day. Perfect for prayer rooms, bible study
+servers, fellowship calls, and quiet background worship.
 ```
 
 ## 4. Art assets (for portal uploads)
 
-- Cover (512×512): `assets/bible-songs-cover.png` *(raw URL below)*
+- Cover (512×512): `assets/bible-songs-cover.png`
 - Banner (1408×768): `assets/bible-songs-banner.png`
 
 Raw URLs (use these for the portal):
@@ -76,13 +65,17 @@ https://raw.githubusercontent.com/Walusimbi-Leon1/bible-songs/main/assets/bible-
 https://raw.githubusercontent.com/Walusimbi-Leon1/bible-songs/main/assets/bible-songs-banner.png
 ```
 
-## 5. Test checklist (after creds wired)
+## 5. Test checklist (in Discord)
 
 - [ ] Launch activity in a voice channel → Discord authorize prompt appears
-- [ ] Tap **Start Listening** → audio begins (sandbox needs the gesture)
+- [ ] After authorize: your name/avatar shows in the top bar
+- [ ] 3-2-1 countdown auto-runs → stream starts with NO button press
 - [ ] Song auto-advances when it ends (never stops)
-- [ ] No pause/skip controls visible — only 🔊 volume + mute
-- [ ] Volume slider works; mute toggles
-- [ ] Relaunch → same rotation continues
+- [ ] No pause/skip controls — only 🔊 volume + mute
+- [ ] Listening dashboard shows everyone in the channel + live count
+- [ ] Open chat → send a message; others see it within ~3s
+- [ ] Reply to a specific message (↩) → shows "Replying to X: …"
+- [ ] @mention a listener → chip renders in the message
+- [ ] Relaunch → same rotation continues, presence updates
 - [ ] Privacy / Terms links work in-window
 - [ ] 💛 Support Developer opens donate page in browser (Discord trust prompt)
