@@ -656,7 +656,16 @@ async function handleNextSongGet() {
   try {
     const lock = await getNextSongLock();
     if (!lock) return json({ locked: false });
-    return json({ locked: true, songId: lock.songId, selectorUid: lock.uid });
+    // Prefer the name stored on the lock when it was set; fall back to the
+    // selector's live presence record, then to their uid.
+    let selectorName = lock.name;
+    if (!selectorName && lock.uid) {
+      const presence = (await readJson(`${SOC_DB}/${SOC_NS}/presence.json`)) || {};
+      for (const p of Object.values(presence)) {
+        if (p && p.uid === lock.uid && p.name) { selectorName = p.name; break; }
+      }
+    }
+    return json({ locked: true, songId: lock.songId, selectorUid: lock.uid, selectorName: selectorName || lock.uid });
   } catch (err) {
     return json({ error: err.message }, 502);
   }
@@ -670,15 +679,16 @@ async function handleNextSongPost(request) {
     const uid = cleanStr(body.uid, 64) || "anon";
 
     const now = Date.now();
+    const name = cleanStr(body.name || "Guest", 40);
     const lock = await getNextSongLock();
     // If no lock exists, or the same user is trying to re-select, allow update.
     if (!lock || lock.uid === uid) {
       await fetch(`${SOC_DB}/${SOC_NS}/nextSongLock.json`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ songId, uid, ts: now }),
+        body: JSON.stringify({ songId, uid, name, ts: now }),
       });
-      nextSongLockCache = { at: now, data: { songId, uid, ts: now } };
+      nextSongLockCache = { at: now, data: { songId, uid, name, ts: now } };
       return json({ ok: true, locked: true });
     }
     // Lock already held by a different user.

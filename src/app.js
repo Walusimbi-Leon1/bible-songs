@@ -152,8 +152,15 @@ async function updateQueueUI() {
   // Update lock status
   const lockData = await fetchNextSongLock();
   if (lockData) {
+    // Keep the module cache fresh so selectQueueSong's immutability guard
+    // sees the latest lock (including this user's own lock).
+    nextSongLock = lockData;
+    nextSongLockTs = Date.now();
+  }
+  if (lockData) {
     if (lockData.locked) {
-      statusEl.textContent = `🔒 Locked by ${lockData.selectorUid || "someone"}`;
+      const label = lockData.selectorName || lockData.selectorUid || "someone";
+      statusEl.textContent = `🔒 Locked by ${label}`;
       statusEl.className = "queue-status locked";
     } else {
       statusEl.textContent = "🔓 Unlocked - select a song to queue next";
@@ -206,13 +213,21 @@ async function updateQueueUI() {
 
 // Select a song for queue
 async function selectQueueSong(songId) {
+  // Cannot change the choice until the currently-locked song finishes:
+  // a lock is immutable once held (cleared only at the song boundary).
+  if (nextSongLock && nextSongLock.locked && nextSongLock.selectorUid === me.uid) {
+    const curTitle = nextSongLock.songId || songId;
+    alert(`You queued ${curTitle} — you can't change it until it plays. Wait for it to finish.`);
+    return;
+  }
   try {
     const res = await fetch("/api/next-song", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ 
         songId: songId,
-        uid: me.uid || "guest-" + Math.random().toString(36).slice(2, 9)
+        uid: me.uid || "guest-" + Math.random().toString(36).slice(2, 9),
+        name: me.name || "Guest"
       })
     });
     
