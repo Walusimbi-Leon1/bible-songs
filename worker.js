@@ -170,6 +170,38 @@ async function handleCatalog() {
   }
 }
 
+// Grouped catalog for the queue picker: ONE entry per base title
+// (e.g. "Psalm 115"), hiding duplicate copies like "Psalm 115 (1)".
+// The app still handles which version plays via the sync-safe selector.
+// Order: Psalms 1→150, then Song of Solomon 1→N (numeric within each book).
+function groupSortKey(id) {
+  const m = id.match(/^(.*?)\s+(\d+)(?:-\d+)?\s*$/);
+  if (m) {
+    const book = m[1].toLowerCase();
+    const rank = book.includes("psalm") ? 0 : book.includes("song of solomon") ? 1 : 2;
+    return [rank, parseInt(m[2], 10), id];
+  }
+  return [3, 0, id];
+}
+
+async function handleGroups() {
+  try {
+    const songs = await getCatalog();
+    const groups = buildGroups(songs);
+    groups.sort((a, b) => {
+      const ka = groupSortKey(a.id), kb = groupSortKey(b.id);
+      for (let i = 0; i < 3; i++) {
+        if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+      }
+      return 0;
+    });
+    const out = groups.map((g) => ({ id: g.id, title: g.title, category: g.category }));
+    return json({ groups: out, count: out.length });
+  } catch (err) {
+    return json({ error: err.message }, 502);
+  }
+}
+
 // ── Shared schedule (radio clock) ────────────────────────────────────────────
 let schedCache = { at: 0, data: null };
 let durationsCache = { at: 0, data: null };
@@ -714,6 +746,7 @@ export default {
     try {
       if (path === "/api/exchange" && request.method === "POST") return await handleExchange(request, env);
       if (path === "/api/songs") return await handleCatalog();
+      if (path === "/api/groups") return await handleGroups();
       if (path === "/api/sync") return await handleSync();
       if (path === "/api/presence" && request.method === "POST") return await handlePresence(request);
       if (path === "/api/listeners") return await handleListeners();

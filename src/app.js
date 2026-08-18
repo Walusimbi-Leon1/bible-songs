@@ -111,15 +111,16 @@ let queueModal = null;
 let queueSongs = []; // all songs for selection
 let queueLoading = false;
 
-// Load all songs for queue selection
+// Load grouped songs (base titles only, no duplicate copies) for queue selection
 async function loadQueueSongs() {
   try {
-    const res = await fetch("/api/songs", { cache: "no-store" });
-    if (!res.ok) throw new Error("songs " + res.status);
+    const res = await fetch("/api/groups", { cache: "no-store" });
+    if (!res.ok) throw new Error("groups " + res.status);
     const data = await res.json();
-    queueSongs = data.songs || [];
+    // data.groups: [{ id, title, category }] — one per base title
+    queueSongs = data.groups || [];
   } catch (e) {
-    console.error("[Queue] Failed to load songs:", e);
+    console.error("[Queue] Failed to load groups:", e);
     queueSongs = [];
   }
 }
