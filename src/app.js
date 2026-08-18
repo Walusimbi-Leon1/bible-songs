@@ -290,7 +290,21 @@ async function loadSync() {
   data.rotation.forEach((s) => {
     sched.byId[s.id] = { id: s.id, title: s.title, artist: s.artist, category: s.category, durationMs: s.durationMs || 210000 };
   });
+
+  // If the worker consumed a lock this cycle, clear our local cache so the
+  // immutability guard no longer blocks this user from picking again.
+  if (data.lockedSong) {
+    nextSongLock = { locked: true, songId: data.lockedSong.songId, selectorUid: data.lockedSong.selectorUid, selectorName: data.lockedSong.selectorName, ts: Date.now() };
+    nextSongLockTs = Date.now();
+  } else if (data.next && (!nextSongLock || nextSongLock.songId !== data.next.id)) {
+    // No active lock on the upcoming track — the cached lock is stale.
+    nextSongLock = null;
+    nextSongLockTs = 0;
+  }
+
   cur = computeCurrent();
+  // Reflect the worker's authoritative "up next" (respects locks) in the header.
+  renderNextSong(data);
 }
 
 function remainingInSong(now = Date.now()) {
@@ -411,6 +425,24 @@ function updateNowPlaying(song, target) {
     const frac = Math.min(1, Math.max(0, target.offsetMs / target.durationMs));
     $("disc").style.setProperty("--progress", (frac * 360).toFixed(0) + "deg");
   }
+}
+
+// ── Up-next display ──────────────────────────────────────────────────────────
+function renderNextSong(data) {
+  const el = $("np-next");
+  if (!el) return;
+  const next = data && data.next;
+  if (!next) { el.textContent = "Up next…"; return; }
+  // "isMine" = the lock on the upcoming track belongs to this listener.
+  // When a lock is active, data.lockedSong carries the selector; otherwise
+  // fall back to our fresh local cache.
+  const lk = data.lockedSong || (nextSongLock && nextSongLock.locked ? nextSongLock : null);
+  const isMine = !!(lk && lk.selectorUid === me.uid);
+  const byName = lk ? (lk.selectorName || lk.selectorUid) : null;
+  let tag = "";
+  if (isMine) { tag = " (Selected by you)"; }
+  else if (byName) { tag = ` (Selected by ${byName})`; }
+  el.textContent = `Next: ${next.title}${tag}`;
 }
 
 // ── Volume / mute (the ONLY controls) ───────────────────────────────────────

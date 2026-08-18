@@ -307,8 +307,28 @@ async function handleSync() {
     const byId = {};
     groups.forEach((g) => { byId[g.id] = g; });
     const cur = schedulePosition(sched, durations, now);
+
+    // Honor a queue lock: the locked song MUST be the very next song played,
+    // overriding the seeded rotation. Splice the locked group into the
+    // rotation right after the current song, then consume (clear) the lock
+    // so it only affects the single upcoming transition.
+    const lock = await getNextSongLock();
+    let lockedSong = null;
+    let rotationGroupIds = sched.groupIds.slice();
+    if (lock && lock.songId && byId[lock.songId]) {
+      const gIdx = rotationGroupIds.indexOf(lock.songId);
+      if (gIdx > -1) rotationGroupIds.splice(gIdx, 1); // remove from scheduled slot
+      // Insert right after the current song so it is unambiguously "next".
+      const insertAt = Math.min(cur.index + 1, rotationGroupIds.length);
+      rotationGroupIds.splice(insertAt, 0, lock.songId);
+      lockedSong = { songId: lock.songId, selectorUid: lock.uid, selectorName: lock.name || lock.uid };
+      // Consume the lock: it only governs the single upcoming transition.
+      await fetch(`${SOC_DB}/${SOC_NS}/nextSongLock.json`, { method: "DELETE" });
+      nextSongLockCache = { at: now, data: null };
+    }
+
     // Resolve each group to its chosen version for this loop (sync-safe).
-    const rotation = sched.groupIds.map((id) => {
+    const rotation = rotationGroupIds.map((id) => {
       const g = byId[id] || { id, title: id, artist: "SGSS", category: "-", versions: [{ id, url: "", title: id }] };
       const vIdx = selectVersionIndex(g, loop);
       const v = g.versions[vIdx] || g.versions[0];
@@ -324,17 +344,26 @@ async function handleSync() {
         durationMs: primaryDur,
       };
     });
-    const curGroup = byId[cur.id] || { id: cur.id, title: cur.id, artist: "SGSS", category: "-", primaryId: cur.id, versions: [{ id: cur.id, url: "", title: cur.id }] };
+    // Recompute cur against the *adjusted* rotation (a lock may have shifted indices)
+    // so the client's position math stays aligned with the injected next-song.
+    const curIdxInAdjusted = rotationGroupIds.indexOf(cur.id);
+    const curAdj = curIdxInAdjusted > -1 ? { index: curIdxInAdjusted, id: cur.id, offsetMs: cur.offsetMs, durationMs: cur.durationMs } : cur;
+    const curGroup = byId[curAdj.id] || { id: curAdj.id, title: curAdj.id, artist: "SGSS", category: "-", primaryId: curAdj.id, versions: [{ id: curAdj.id, url: "", title: curAdj.id }] };
     const cIdx = selectVersionIndex(curGroup, loop);
     const cV = curGroup.versions[cIdx] || curGroup.versions[0];
+    // Next song = the track right after current in the adjusted rotation.
+    const nextIdx = (curIdxInAdjusted + 1) % rotationGroupIds.length;
+    const nextSong = rotation[nextIdx];
     return json({
       epoch: sched.epoch,
       cycleMs: sched.cycleMs,
       now,
       loop,
-      current: { ...cur, song: { id: curGroup.id, title: curGroup.title, artist: curGroup.artist, category: curGroup.category, url: cV.url, versionTitle: cV.title } },
+      current: { ...curAdj, song: { id: curGroup.id, title: curGroup.title, artist: curGroup.artist, category: curGroup.category, url: cV.url, versionTitle: cV.title } },
+      next: nextSong,
+      lockedSong,
       rotation,
-      count: sched.groupIds.length,
+      count: rotationGroupIds.length,
     });
   } catch (err) {
     return json({ error: err.message }, 502);
