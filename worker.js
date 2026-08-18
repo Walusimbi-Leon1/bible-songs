@@ -57,6 +57,71 @@ const DEFAULT_MS = 210000;  // fallback song duration (3.5 min)
 // Only these genres remain in the rotation (per Leon, 2026-08-08).
 const ALLOWED_CATEGORIES = new Set(["Psalms", "Song of Solomon"]);
 
+// ── Version grouping ────────────────────────────────────────────────────────
+// One catalog entry per audio file. Songs with multiple recordings (e.g.
+// "Psalm 1 (1)") share a BASE title ("Psalm 1"). We group them so the app
+// shows only the base title but can play a different recording each loop.
+function baseTitle(title) {
+  return title.replace(/\s*\(\d+\)\s*$/, "").trim();
+}
+
+function variantIndex(title, base) {
+  const m = title.slice(base.length).trim().match(/^\((\d+)\)$/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+// FNV-1a hash → stable 32-bit unsigned. Used for deterministic, sync-safe
+// version selection so EVERY client hears the SAME recording at the SAME time.
+function hashStr(str) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+// Build groups from the flat catalog. Each group:
+//   { id, title, artist, category, versions: [{id, url, title, variant}] }
+// versions are sorted by variant index (0 = primary, 1 = "(1)", ...).
+function buildGroups(songs) {
+  const byBase = new Map();
+  for (const s of songs) {
+    const base = baseTitle(s.title);
+    if (!byBase.has(base)) byBase.set(base, []);
+    byBase.get(base).push(s);
+  }
+  const groups = [];
+  for (const [base, list] of byBase) {
+    const versions = list
+      .map((s) => ({
+        id: s.id,
+        url: s.url,
+        title: s.title,
+        variant: variantIndex(s.title, base),
+      }))
+      .sort((a, b) => a.variant - b.variant);
+    const primary = versions[0];
+    groups.push({
+      id: base,
+      title: base,
+      artist: list[0].artist,
+      category: list[0].category,
+      primaryId: primary.id,
+      versions,
+    });
+  }
+  groups.sort((a, b) => a.id.localeCompare(b.id));
+  return groups;
+}
+
+// Which version of a group plays for a given loop index (deterministic).
+function selectVersionIndex(group, loopIndex) {
+  const n = group.versions.length;
+  if (n <= 1) return 0;
+  return hashStr(group.id + "\u0000" + loopIndex) % n;
+}
+
 function html(body, status = 200) {
   return new Response(body, {
     status,
@@ -110,6 +175,10 @@ let schedCache = { at: 0, data: null };
 let durationsCache = { at: 0, data: null };
 let sizeCache = {}; // songId → content-length
 
+// Queue-next-song lock (first-come, first-served per round)
+let nextSongLockCache = { at: 0, data: null };
+const NEXT_SONG_TTL = 15000; // ms — re-fetch lock state at most this often
+
 async function readJson(url) {
   const res = await fetch(url);
   if (!res.ok) return null;
@@ -124,6 +193,14 @@ async function getDurations() {
   return data;
 }
 
+async function getNextSongLock() {
+  const now = Date.now();
+  if (nextSongLockCache.data && now - nextSongLockCache.at < NEXT_SONG_TTL) return nextSongLockCache.data;
+  const data = (await readJson(`${SOC_DB}/${SOC_NS}/nextSongLock.json`)) || null;
+  if (data) nextSongLockCache = { at: now, data };
+  return data;
+}
+
 async function getSchedule() {
   const now = Date.now();
   if (schedCache.data && now - schedCache.at < 15000) return schedCache.data;
@@ -132,30 +209,38 @@ async function getSchedule() {
   return data;
 }
 
+function loopIndexFor(now, sched) {
+  if (!sched || !sched.cycleMs) return 0;
+  return Math.floor((now - sched.epoch) / sched.cycleMs);
+}
+
 async function ensureSchedule() {
   const songs = await getCatalog();
-  const hash = songs.map((s) => s.id).sort().join("|");
+  const groups = buildGroups(songs);
+  const hash = groups.map((g) => g.id).sort().join("|");
   let sched = await getSchedule();
-  if (sched && sched.hash === hash && Array.isArray(sched.songIds) && sched.songIds.length === songs.length) {
+  if (sched && sched.hash === hash && Array.isArray(sched.groupIds) && sched.groupIds.length === groups.length) {
     return sched;
   }
   // Rebuild from stored durations (no probing loop — kept light for the sandbox).
   const durations = await getDurations();
-  const songIds = songs.map((s) => s.id);
+  const groupIds = groups.map((g) => g.id);
   // Deterministic seeded shuffle from the catalog hash (stable across rebuilds).
   let seed = 0;
   for (let i = 0; i < hash.length; i++) seed = (seed * 31 + hash.charCodeAt(i)) >>> 0;
-  for (let i = songIds.length - 1; i > 0; i--) {
+  for (let i = groupIds.length - 1; i > 0; i--) {
     seed = (seed + 0x6d2b79f5) >>> 0;
     let t = seed;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     const j = ((t ^ (t >>> 14)) >>> 0) % (i + 1);
-    [songIds[i], songIds[j]] = [songIds[j], songIds[i]];
+    [groupIds[i], groupIds[j]] = [groupIds[j], groupIds[i]];
   }
-  const cycleMs = songIds.reduce((a, id) => a + (durations[id] || DEFAULT_MS), 0);
+  const byId = {};
+  groups.forEach((g) => { byId[g.id] = g; });
+  const cycleMs = groupIds.reduce((a, id) => a + (durations[byId[id].primaryId] || DEFAULT_MS), 0);
   const epoch = Date.now() - (Date.now() % 60000) - 60000;
-  sched = { hash, epoch, songIds, cycleMs, count: songIds.length, updatedAt: Date.now() };
+  sched = { hash, epoch, groupIds, cycleMs, count: groupIds.length, updatedAt: Date.now() };
   await fetch(`${SOC_DB}/${SOC_NS}/schedule.json`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -166,38 +251,58 @@ async function ensureSchedule() {
 }
 
 function schedulePosition(sched, durations, now) {
+  const groupIds = sched.groupIds;
   const elapsed = ((now - sched.epoch) % sched.cycleMs + sched.cycleMs) % sched.cycleMs;
   let acc = 0;
-  for (let i = 0; i < sched.songIds.length; i++) {
-    const id = sched.songIds[i];
+  for (let i = 0; i < groupIds.length; i++) {
+    const id = groupIds[i];
     const d = durations[id] || DEFAULT_MS;
     if (acc + d > elapsed) {
       return { index: i, id, offsetMs: elapsed - acc, durationMs: d };
     }
     acc += d;
   }
-  const id = sched.songIds[sched.songIds.length - 1];
-  return { index: sched.songIds.length - 1, id, offsetMs: 0, durationMs: durations[id] || DEFAULT_MS };
+  const id = groupIds[groupIds.length - 1];
+  return { index: groupIds.length - 1, id, offsetMs: 0, durationMs: durations[id] || DEFAULT_MS };
 }
 
 async function handleSync() {
   try {
     const [sched, durations, songs] = await Promise.all([ensureSchedule(), getDurations(), getCatalog()]);
     const now = Date.now();
-    const cur = schedulePosition(sched, durations, now);
+    const loop = loopIndexFor(now, sched);
+    const groups = buildGroups(songs);
     const byId = {};
-    songs.forEach((s) => { byId[s.id] = { id: s.id, title: s.title, artist: s.artist, category: s.category }; });
-    const rotation = sched.songIds.map((id) => ({
-      ...(byId[id] || { id, title: "Untitled", artist: "SGSS", category: "—" }),
-      durationMs: durations[id] || DEFAULT_MS,
-    }));
+    groups.forEach((g) => { byId[g.id] = g; });
+    const cur = schedulePosition(sched, durations, now);
+    // Resolve each group to its chosen version for this loop (sync-safe).
+    const rotation = sched.groupIds.map((id) => {
+      const g = byId[id] || { id, title: id, artist: "SGSS", category: "-", versions: [{ id, url: "", title: id }] };
+      const vIdx = selectVersionIndex(g, loop);
+      const v = g.versions[vIdx] || g.versions[0];
+      const primaryDur = durations[g.primaryId] || DEFAULT_MS;
+      return {
+        id: g.id,
+        title: g.title,
+        artist: g.artist,
+        category: g.category,
+        url: v.url,
+        versionTitle: v.title,
+        variant: v.variant,
+        durationMs: primaryDur,
+      };
+    });
+    const curGroup = byId[cur.id] || { id: cur.id, title: cur.id, artist: "SGSS", category: "-", primaryId: cur.id, versions: [{ id: cur.id, url: "", title: cur.id }] };
+    const cIdx = selectVersionIndex(curGroup, loop);
+    const cV = curGroup.versions[cIdx] || curGroup.versions[0];
     return json({
       epoch: sched.epoch,
       cycleMs: sched.cycleMs,
       now,
-      current: { ...cur, song: byId[cur.id] || null },
+      loop,
+      current: { ...cur, song: { id: curGroup.id, title: curGroup.title, artist: curGroup.artist, category: curGroup.category, url: cV.url, versionTitle: cV.title } },
       rotation,
-      count: sched.songIds.length,
+      count: sched.groupIds.length,
     });
   } catch (err) {
     return json({ error: err.message }, 502);
@@ -221,11 +326,19 @@ async function getSize(songUrl) {
 async function handleStream(request, env, ctx, songId, url) {
   try {
     const songs = await getCatalog();
-    const song = songs.find((s) => s.id === decodeURIComponent(songId));
-    if (!song) return json({ error: "song not found" }, 404);
+    const groups = buildGroups(songs);
+    const base = decodeURIComponent(songId);
+    const group = groups.find((g) => g.id === base);
+    if (!group) return json({ error: "song not found" }, 404);
+
+    // Pick the version for the current loop — must match /api/sync (sync-safe).
+    const sched = await ensureSchedule();
+    const loop = loopIndexFor(Date.now(), sched);
+    const vIdx = selectVersionIndex(group, loop);
+    const song = group.versions[vIdx] || group.versions[0];
 
     const durations = await getDurations();
-    const durationMs = durations[song.id] || DEFAULT_MS;
+    const durationMs = durations[group.primaryId] || DEFAULT_MS;
 
     let range = request.headers.get("Range") || "";
     // Seek support: ?start=<seconds> → byte offset (duration ratio).
@@ -506,6 +619,53 @@ async function pruneChat() {
   } catch (e) { /* best-effort */ }
 }
 
+// Queue-next-song lock (first-come, first-served per round)
+async function handleNextSongGet() {
+  try {
+    const lock = await getNextSongLock();
+    if (!lock) return json({ locked: false });
+    return json({ locked: true, songId: lock.songId, selectorUid: lock.uid });
+  } catch (err) {
+    return json({ error: err.message }, 502);
+  }
+}
+
+async function handleNextSongPost(request) {
+  try {
+    const body = await request.json().catch(() => ({}));
+    const songId = cleanStr(body.songId, 64);
+    if (!songId) return json({ error: "missing songId" }, 400);
+    const uid = cleanStr(body.uid, 64) || "anon";
+
+    const now = Date.now();
+    const lock = await getNextSongLock();
+    // If no lock exists, or the same user is trying to re-select, allow update.
+    if (!lock || lock.uid === uid) {
+      await fetch(`${SOC_DB}/${SOC_NS}/nextSongLock.json`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ songId, uid, ts: now }),
+      });
+      nextSongLockCache = { at: now, data: { songId, uid, ts: now } };
+      return json({ ok: true, locked: true });
+    }
+    // Lock already held by a different user.
+    return json({ ok: false, locked: true, reason: "locked by another user" }, 409);
+  } catch (err) {
+    return json({ error: err.message }, 502);
+  }
+}
+
+async function handleNextSongDelete(request) {
+  try {
+    await fetch(`${SOC_DB}/${SOC_NS}/nextSongLock.json`, { method: "DELETE" });
+    nextSongLockCache = { at: Date.now(), data: null };
+    return json({ ok: true });
+  } catch (err) {
+    return json({ error: err.message }, 502);
+  }
+}
+
 // ── Discord OAuth exchange (confidential client) ─────────────────────────────
 async function handleExchange(request, env) {
   try {
@@ -560,6 +720,17 @@ export default {
       if (path === "/api/leaderboard") return await handleLeaderboard();
       if (path === "/api/chat" && request.method === "POST") {
         const r = await handleChatPost(request);
+        ctx.waitUntil(pruneChat());
+        return r;
+      }
+      if (path === "/api/next-song" && request.method === "GET") return await handleNextSongGet();
+      if (path === "/api/next-song" && request.method === "POST") {
+        const r = await handleNextSongPost(request);
+        ctx.waitUntil(pruneChat()); // also prune chat on next-song POST for consistency
+        return r;
+      }
+      if (path === "/api/next-song" && request.method === "DELETE") {
+        const r = await handleNextSongDelete(request);
         ctx.waitUntil(pruneChat());
         return r;
       }

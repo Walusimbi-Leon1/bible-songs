@@ -35,6 +35,10 @@ let sessionId = "";
 let listeners = [];
 let countdownTimer = null;
 
+// Queue-next-song UI state
+let nextSongLock = null; // { songId, selectorUid }
+let nextSongLockTs = 0;
+
 // Chat state
 let chat = new Map();    // id → message (dedupe)
 let lastChatTs = Date.now();
@@ -75,6 +79,171 @@ function timeAgo(ts) {
   if (s < 3600) return Math.floor(s / 60) + "m";
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
+}
+
+// Queue-next-song helpers
+async function fetchNextSongLock() {
+  try {
+    const res = await fetch("/api/next-song", { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function updateNextSongLock() {
+  const data = await fetchNextSongLock();
+  if (data) {
+    nextSongLock = data;
+    nextSongLockTs = Date.now();
+  }
+}
+
+// Render a small lock icon on the selector's avatar in the listeners bar
+function renderNextSongLockOnListener(uid) {
+  if (!nextSongLock || !nextSongLock.selectorUid) return false;
+  return nextSongLock.selectorUid === uid;
+}
+
+// Queue UI state
+let queueModal = null;
+let queueSongs = []; // all songs for selection
+let queueLoading = false;
+
+// Load all songs for queue selection
+async function loadQueueSongs() {
+  try {
+    const res = await fetch("/api/songs", { cache: "no-store" });
+    if (!res.ok) throw new Error("songs " + res.status);
+    const data = await res.json();
+    queueSongs = data.songs || [];
+  } catch (e) {
+    console.error("[Queue] Failed to load songs:", e);
+    queueSongs = [];
+  }
+}
+
+// Open queue modal
+function openQueueModal() {
+  if (!queueModal) {
+    queueModal = $("queue-modal");
+  }
+  queueModal.classList.remove("hidden");
+  queueModal.focus();
+  updateQueueUI();
+}
+
+// Close queue modal
+function closeQueueModal() {
+  if (queueModal) {
+    queueModal.classList.add("hidden");
+  }
+}
+
+// Update queue modal UI
+async function updateQueueUI() {
+  const statusEl = $("queue-status");
+  const listEl = $("queue-list");
+  
+  if (!statusEl || !listEl) return;
+  
+  // Update lock status
+  const lockData = await fetchNextSongLock();
+  if (lockData) {
+    if (lockData.locked) {
+      statusEl.textContent = `🔒 Locked by ${lockData.selectorUid || "someone"}`;
+      statusEl.className = "queue-status locked";
+    } else {
+      statusEl.textContent = "🔓 Unlocked - select a song to queue next";
+      statusEl.className = "queue-status unlocked";
+    }
+  } else {
+    statusEl.textContent = "? Checking lock status...";
+    statusEl.className = "queue-status unknown";
+  }
+  
+  // Populate song list
+  if (queueSongs.length === 0) {
+    await loadQueueSongs();
+  }
+  
+  listEl.innerHTML = "";
+  
+  // Add header
+  const header = document.createElement("div");
+  header.className = "queue-item header";
+  header.innerHTML = `<div class="song-title">Song</div><div class="song-detail">Category</div>`;
+  listEl.appendChild(header);
+  
+  // Add songs
+  queueSongs.forEach(song => {
+    const item = document.createElement("div");
+    item.className = "queue-item";
+    
+    // Check if this song is currently locked
+    const isLocked = lockData && lockData.locked && lockData.songId === song.id;
+    if (isLocked) {
+      item.classList.add("locked");
+    }
+    
+    item.innerHTML = `
+      ${isLocked ? '<span class="lock-icon">🔒</span>' : '<span class="lock-icon"></span>'}
+      <div class="song-title">${esc(song.title)}</div>
+      <div class="song-detail">${esc(song.category || "")}</div>
+    `;
+    
+    if (!isLocked) {
+      item.addEventListener("click", () => {
+        selectQueueSong(song.id);
+      });
+    }
+    
+    listEl.appendChild(item);
+  });
+}
+
+// Select a song for queue
+async function selectQueueSong(songId) {
+  try {
+    const res = await fetch("/api/next-song", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 
+        songId: songId,
+        uid: me.uid || "guest-" + Math.random().toString(36).slice(2, 9)
+      })
+    });
+    
+    if (!res.ok) {
+      const error = await res.json();
+      alert(error.error || "Failed to lock song");
+      return;
+    }
+    
+    const result = await res.json();
+    if (result.ok) {
+      // Update UI immediately
+      updateQueueUI();
+      // Close modal after short delay to show feedback
+      setTimeout(closeQueueModal, 300);
+    } else {
+      alert(result.reason || "Failed to lock song");
+    }
+  } catch (e) {
+    console.error("[Queue] Error selecting song:", e);
+    alert("Failed to lock song");
+  }
+}
+
+// Release queue lock (for testing/admin)
+async function releaseQueueLock() {
+  try {
+    await fetch("/api/next-song", { method: "DELETE" });
+    updateQueueUI();
+  } catch (e) {
+    console.error("[Queue] Error releasing lock:", e);
+  }
 }
 
 // ── Sync engine (shared clock) ───────────────────────────────────────────────
@@ -338,6 +507,14 @@ async function pollListeners() {
       const nm = document.createElement("span");
       nm.textContent = l.name;
       chip.appendChild(nm);
+      // If this listener has the queue lock, add a lock icon after the name
+      if (renderNextSongLockOnListener(l.uid)) {
+        const lockIcon = document.createElement("span");
+        lockIcon.className = "lock-icon";
+        lockIcon.title = "Has queued next song";
+        lockIcon.textContent = "🔒";
+        chip.appendChild(lockIcon);
+      }
       chip.addEventListener("click", () => mention(l.name, l.sessionId));
       chips.appendChild(chip);
     });
@@ -693,6 +870,16 @@ async function boot() {
     });
     pollChat();
     setInterval(pollChat, 3000);
+
+    // Queue next song
+    $("queue-btn").addEventListener("click", openQueueModal);
+    $("queue-close").addEventListener("click", closeQueueModal);
+    $("queue-modal").addEventListener("click", (e) => {
+      if (e.target === $("queue-modal")) closeQueueModal();
+    });
+    loadQueueSongs(); // load once
+    setInterval(updateNextSongLock, 5000); // keep lock status fresh
+    setInterval(updateQueueUI, 5000); // update UI if modal open
 
     // Sync clock tick
     setInterval(() => syncTick(), 2000);
