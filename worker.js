@@ -257,17 +257,16 @@ async function ensureSchedule() {
   // Rebuild from stored durations (no probing loop — kept light for the sandbox).
   const durations = await getDurations();
   const groupIds = groups.map((g) => g.id);
-  // Deterministic seeded shuffle from the catalog hash (stable across rebuilds).
-  let seed = 0;
-  for (let i = 0; i < hash.length; i++) seed = (seed * 31 + hash.charCodeAt(i)) >>> 0;
-  for (let i = groupIds.length - 1; i > 0; i--) {
-    seed = (seed + 0x6d2b79f5) >>> 0;
-    let t = seed;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    const j = ((t ^ (t >>> 14)) >>> 0) % (i + 1);
-    [groupIds[i], groupIds[j]] = [groupIds[j], groupIds[i]];
-  }
+  
+  // CHANGE: Instead of deterministic shuffle, we sort them in the natural book order.
+  groupIds.sort((a, b) => {
+    const ka = groupSortKey(a), kb = groupSortKey(b);
+    for (let i = 0; i < 3; i++) {
+      if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+    }
+    return 0;
+  });
+
   const byId = {};
   groups.forEach((g) => { byId[g.id] = g; });
   const cycleMs = groupIds.reduce((a, id) => a + (durations[byId[id].primaryId] || DEFAULT_MS), 0);
@@ -311,7 +310,7 @@ async function handleSync() {
     // Honor a queue lock: the locked song MUST be the very next song played,
     // overriding the seeded rotation. Splice the locked group into the
     // rotation right after the current song, then consume (clear) the lock
-    // so it only affects the single upcoming transition.
+    // so it only affects the the single upcoming transition.
     const lock = await getNextSongLock();
     let lockedSong = null;
     let rotationGroupIds = sched.groupIds.slice();
@@ -537,7 +536,7 @@ async function handleLeaderboard() {
     users.sort((a, b) => b.seconds - a.seconds || (a.firstSeen || 0) - (b.firstSeen || 0));
     return json({ leaderboard: users.slice(0, LB_TOP), total: users.length });
   } catch (err) {
-    return json({ error: err.message }, 500);
+    return json({ error: err.message }, 502);
   }
 }
 
@@ -563,7 +562,7 @@ async function handleListeners() {
     active.sort((a, b) => a.sessionId.localeCompare(b.sessionId));
     return json({ listeners: active, count: active.length });
   } catch (err) {
-    return json({ error: err.message }, 500);
+    return json({ error: err.message }, 502);
   }
 }
 
@@ -662,7 +661,7 @@ async function handleChatGet(request) {
 
     return json({ messages, count: messages.length, hasMore });
   } catch (err) {
-    return json({ error: err.message }, 500);
+    return json({ error: err.message }, 502);
   }
 }
 
@@ -723,7 +722,7 @@ async function handleNextSongPost(request) {
     // Lock already held by a different user.
     return json({ ok: false, locked: true, reason: "locked by another user" }, 409);
   } catch (err) {
-    return json({ error: err.message }, 502);
+    return json({ error: "missing songId" }, 400);
   }
 }
 
@@ -733,7 +732,7 @@ async function handleNextSongDelete(request) {
     nextSongLockCache = { at: Date.now(), data: null };
     return json({ ok: true });
   } catch (err) {
-    return json({ error: err.message }, 502);
+    return json({ error: err.message }, 500);
   }
 }
 
@@ -822,7 +821,7 @@ export default {
       if (content !== undefined) {
         const ext = "." + (assetPath.split(".").pop() || "");
         return new Response(content, {
-          headers: { "Content-Type": CONTENT_TYPES[ext] || "text/plain; charset=utf-8", "Cache-Control": "no-cache" },
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" },
         });
       }
       return notFound();
