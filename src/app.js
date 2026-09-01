@@ -35,9 +35,7 @@ let sessionId = "";
 let listeners = [];
 let countdownTimer = null;
 
-// Queue-next-song UI state
-let nextSongLock = null; // { songId, selectorUid }
-let nextSongLockTs = 0;
+// ── Listening dashboard state ────────────────────────────────────────────────
 
 // Chat state
 let chat = new Map();    // id → message (dedupe)
@@ -81,187 +79,6 @@ function timeAgo(ts) {
   return Math.floor(s / 86400) + "d";
 }
 
-// Queue-next-song helpers
-async function fetchNextSongLock() {
-  try {
-    const res = await fetch("/api/next-song", { cache: "no-store" });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (e) {
-    return null;
-  }
-}
-
-async function updateNextSongLock() {
-  const data = await fetchNextSongLock();
-  if (data) {
-    nextSongLock = data;
-    nextSongLockTs = Date.now();
-  }
-}
-
-// Render a small lock icon on the selector's avatar in the listeners bar
-function renderNextSongLockOnListener(uid) {
-  if (!nextSongLock || !nextSongLock.selectorUid) return false;
-  return nextSongLock.selectorUid === uid;
-}
-
-// Queue UI state
-let queueModal = null;
-let queueSongs = []; // all songs for selection
-let queueLoading = false;
-
-// Load grouped songs (base titles only, no duplicate copies) for queue selection
-async function loadQueueSongs() {
-  try {
-    const res = await fetch("/api/groups", { cache: "no-store" });
-    if (!res.ok) throw new Error("groups " + res.status);
-    const data = await res.json();
-    // data.groups: [{ id, title, category }] — one per base title
-    queueSongs = data.groups || [];
-  } catch (e) {
-    console.error("[Queue] Failed to load groups:", e);
-    queueSongs = [];
-  }
-}
-
-// Open queue modal
-function openQueueModal() {
-  if (!queueModal) {
-    queueModal = $("queue-modal");
-  }
-  queueModal.classList.remove("hidden");
-  queueModal.focus();
-  updateQueueUI();
-}
-
-// Close queue modal
-function closeQueueModal() {
-  if (queueModal) {
-    queueModal.classList.add("hidden");
-  }
-}
-
-// Update queue modal UI
-async function updateQueueUI() {
-  const statusEl = $("queue-status");
-  const listEl = $("queue-list");
-  
-  if (!statusEl || !listEl) return;
-  
-  // Update lock status
-  const lockData = await fetchNextSongLock();
-  if (lockData) {
-    // Keep the module cache fresh so selectQueueSong's immutability guard
-    // sees the latest lock (including this user's own lock).
-    nextSongLock = lockData;
-    nextSongLockTs = Date.now();
-  }
-  if (lockData) {
-    if (lockData.locked) {
-      const label = lockData.selectorName || lockData.selectorUid || "someone";
-      statusEl.textContent = `🔒 Locked by ${label}`;
-      statusEl.className = "queue-status locked";
-    } else {
-      statusEl.textContent = "🔓 Unlocked - select a song to queue next";
-      statusEl.className = "queue-status unlocked";
-    }
-  } else {
-    statusEl.textContent = "? Checking lock status...";
-    statusEl.className = "queue-status unknown";
-  }
-  
-  // Populate song list
-  if (queueSongs.length === 0) {
-    await loadQueueSongs();
-  }
-  
-  listEl.innerHTML = "";
-  
-  // Add header
-  const header = document.createElement("div");
-  header.className = "queue-item header";
-  header.innerHTML = `<div class="song-title">Song</div><div class="song-detail">Category</div>`;
-  listEl.appendChild(header);
-  
-  // Add songs
-  queueSongs.forEach(song => {
-    const item = document.createElement("div");
-    item.className = "queue-item";
-    
-    // Check if this song is currently locked
-    const isLocked = lockData && lockData.locked && lockData.songId === song.id;
-    if (isLocked) {
-      item.classList.add("locked");
-    }
-    
-    item.innerHTML = `
-      ${isLocked ? '<span class="lock-icon">🔒</span>' : '<span class="lock-icon"></span>'}
-      <div class="song-title">${esc(song.title)}</div>
-      <div class="song-detail">${esc(song.category || "")}</div>
-    `;
-    
-    if (!isLocked) {
-      item.addEventListener("click", () => {
-        selectQueueSong(song.id);
-      });
-    }
-    
-    listEl.appendChild(item);
-  });
-}
-
-// Select a song for queue
-async function selectQueueSong(songId) {
-  // Cannot change the choice until the currently-locked song finishes:
-  // a lock is immutable once held (cleared only at the song boundary).
-  if (nextSongLock && nextSongLock.locked && nextSongLock.selectorUid === me.uid) {
-    const curTitle = nextSongLock.songId || songId;
-    alert(`You queued ${curTitle} — you can't change it until it plays. Wait for it to finish.`);
-    return;
-  }
-  try {
-    const res = await fetch("/api/next-song", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        songId: songId,
-        uid: me.uid || "guest-" + Math.random().toString(36).slice(2, 9),
-        name: me.name || "Guest"
-      })
-    });
-    
-    if (!res.ok) {
-      const error = await res.json();
-      alert(error.error || "Failed to lock song");
-      return;
-    }
-    
-    const result = await res.json();
-    if (result.ok) {
-      // Update UI immediately
-      updateQueueUI();
-      // Close modal after short delay to show feedback
-      setTimeout(closeQueueModal, 300);
-    } else {
-      alert(result.reason || "Failed to lock song");
-    }
-  } catch (e) {
-    console.error("[Queue] Error selecting song:", e);
-    alert("Failed to lock song");
-  }
-}
-
-// Release queue lock (for testing/admin)
-async function releaseQueueLock() {
-  try {
-    await fetch("/api/next-song", { method: "DELETE" });
-    updateQueueUI();
-  } catch (e) {
-    console.error("[Queue] Error releasing lock:", e);
-  }
-}
-
 // ── Sync engine (shared clock) ───────────────────────────────────────────────
 function computeCurrent(now = Date.now()) {
   if (!sched) return null;
@@ -270,7 +87,9 @@ function computeCurrent(now = Date.now()) {
   for (let i = 0; i < sched.songIds.length; i++) {
     const id = sched.songIds[i];
     const d = sched.byId[id].durationMs;
-    if (acc + d > elapsed) return { index: i, id, offsetMs: elapsed - acc, durationMs: d };
+    // Use >= so a song whose duration exactly equals the remaining elapsed
+    // doesn't fall through and get skipped (shortens the song).
+    if (acc + d >= elapsed) return { index: i, id, offsetMs: Math.max(0, elapsed - acc), durationMs: d };
     acc += d;
   }
   const id = sched.songIds[sched.songIds.length - 1];
@@ -291,20 +110,9 @@ async function loadSync() {
     sched.byId[s.id] = { id: s.id, title: s.title, artist: s.artist, category: s.category, durationMs: s.durationMs || 210000 };
   });
 
-  // If the worker consumed a lock this cycle, clear our local cache so the
-  // immutability guard no longer blocks this user from picking again.
-  if (data.lockedSong) {
-    nextSongLock = { locked: true, songId: data.lockedSong.songId, selectorUid: data.lockedSong.selectorUid, selectorName: data.lockedSong.selectorName, ts: Date.now() };
-    nextSongLockTs = Date.now();
-  } else if (data.next && (!nextSongLock || nextSongLock.songId !== data.next.id)) {
-    // No active lock on the upcoming track — the cached lock is stale.
-    nextSongLock = null;
-    nextSongLockTs = 0;
-  }
-
   cur = computeCurrent();
-  // Reflect the worker's authoritative "up next" (respects locks) in the header.
-  renderNextSong(data);
+  // Initialize up-next display from local schedule
+  renderNextSongFromSchedule();
 }
 
 function remainingInSong(now = Date.now()) {
@@ -321,18 +129,22 @@ function applyClock(force) {
   if (cur && cur.id !== target.id) {
     // Song boundary — switch.
     switchTo(target, true);
-  } else {
-    cur = target;
-    if (audioSongId !== target.id) {
-      switchTo(target, false);
-    } else if (force) {
-      const want = target.offsetMs / 1000;
-      const have = audio.currentTime || 0;
-      if (audio.readyState >= 2 && Math.abs(have - want) > 5) {
-        try { audio.currentTime = want; } catch (e) {}
-      }
+    return;
+  }
+  cur = target;
+  if (audioSongId !== target.id) {
+    switchTo(target, false);
+    return;
+  }
+  if (force) {
+    const want = target.offsetMs / 1000;
+    const have = audio.currentTime || 0;
+    if (audio.readyState >= 2 && Math.abs(have - want) > 5) {
+      try { audio.currentTime = want; } catch (e) {}
     }
   }
+  // Keep the up-next display fresh on every clock application.
+  renderNextSongFromSchedule();
 }
 
 function syncTick() {
@@ -355,6 +167,34 @@ function syncTick() {
   if (audio.readyState >= 2 && Math.abs(have - want) > 8) {
     try { audio.currentTime = want; } catch (e) {}
   }
+  // Update next song display on each tick so it stays in sync as the
+  // current song advances toward its boundary.
+  renderNextSongFromSchedule();
+}
+
+// ── Up-next display from local schedule data ─────────────────────────────────
+function renderNextSongFromSchedule() {
+  const el = $("np-next");
+  if (!el) {
+    console.warn('[NextSong] np-next element not found');
+    return;
+  }
+  if (!sched || !cur) { 
+    el.textContent = "Loading…"; 
+    console.debug('[NextSong] sched or cur missing', { sched: !!sched, cur: !!cur });
+    return; 
+  }
+  const nextIndex = (cur.index + 1) % sched.songIds.length;
+  const nextId = sched.songIds[nextIndex];
+  const nextSong = sched.byId[nextId];
+  if (nextSong) {
+    const text = `Next: ${nextSong.title}`;
+    el.textContent = text;
+    console.debug('[NextSong] updated to:', { text, curId: cur.id, nextId });
+  } else {
+    el.textContent = "Up next…";
+    console.debug('[NextSong] no next song');
+  }
 }
 
 function switchTo(target, isBoundary) {
@@ -369,6 +209,7 @@ function switchTo(target, isBoundary) {
   audioSongId = target.id;
   lastSwitchAt = Date.now();
   updateNowPlaying(song, target);
+  renderNextSongFromSchedule();
   const p = audio.play();
   if (p) p.catch(() => {});
 }
@@ -386,15 +227,10 @@ audio.addEventListener("pause", () => {
 });
 audio.addEventListener("ended", () => {
   // Never rely on 'ended' for advancement — the shared clock decides.
-  // If our duration estimate is shorter than the real song, skip to the
-  // next song at its clock offset; otherwise just resync at the boundary.
-  const remaining = remainingInSong();
-  if (remaining > 8000) {
-    const next = computeCurrent(Date.now() + remaining + 100);
-    if (next && next.id !== cur.id) switchTo(next, true);
-  } else {
-    applyClock(true);
-  }
+  // If our duration estimate is shorter than the real song, the clock may
+  // have already advanced us; just resync to the current position.
+  // We do NOT force an early switch here — let syncTick/applyClock handle it.
+  applyClock(true);
 });
 audio.addEventListener("error", () => {
   setTimeout(() => {
@@ -402,7 +238,7 @@ audio.addEventListener("error", () => {
     const target = computeCurrent(Date.now() + 3000);
     if (target && (!cur || target.id !== cur.id)) switchTo(target, true);
     else applyClock(true);
-  }, 2500);
+  }, 2000);
 });
 audio.addEventListener("loadedmetadata", () => {
   // Seek to the correct offset once metadata is known (covers VBR drift).
@@ -428,23 +264,6 @@ function updateNowPlaying(song, target) {
 }
 
 // ── Up-next display ──────────────────────────────────────────────────────────
-function renderNextSong(data) {
-  const el = $("np-next");
-  if (!el) return;
-  const next = data && data.next;
-  if (!next) { el.textContent = "Up next…"; return; }
-  // "isMine" = the lock on the upcoming track belongs to this listener.
-  // When a lock is active, data.lockedSong carries the selector; otherwise
-  // fall back to our fresh local cache.
-  const lk = data.lockedSong || (nextSongLock && nextSongLock.locked ? nextSongLock : null);
-  const isMine = !!(lk && lk.selectorUid === me.uid);
-  const byName = lk ? (lk.selectorName || lk.selectorUid) : null;
-  let tag = "";
-  if (isMine) { tag = " (Selected by you)"; }
-  else if (byName) { tag = ` (Selected by ${byName})`; }
-  el.textContent = `Next: ${next.title}${tag}`;
-}
-
 // ── Volume / mute (the ONLY controls) ───────────────────────────────────────
 const volSlider = $("vol-slider");
 const volPct = $("vol-pct");
@@ -555,14 +374,6 @@ async function pollListeners() {
       const nm = document.createElement("span");
       nm.textContent = l.name;
       chip.appendChild(nm);
-      // If this listener has the queue lock, add a lock icon after the name
-      if (renderNextSongLockOnListener(l.uid)) {
-        const lockIcon = document.createElement("span");
-        lockIcon.className = "lock-icon";
-        lockIcon.title = "Has queued next song";
-        lockIcon.textContent = "🔒";
-        chip.appendChild(lockIcon);
-      }
       chip.addEventListener("click", () => mention(l.name, l.sessionId));
       chips.appendChild(chip);
     });
@@ -918,16 +729,6 @@ async function boot() {
     });
     pollChat();
     setInterval(pollChat, 3000);
-
-    // Queue next song
-    $("queue-btn").addEventListener("click", openQueueModal);
-    $("queue-close").addEventListener("click", closeQueueModal);
-    $("queue-modal").addEventListener("click", (e) => {
-      if (e.target === $("queue-modal")) closeQueueModal();
-    });
-    loadQueueSongs(); // load once
-    setInterval(updateNextSongLock, 5000); // keep lock status fresh
-    setInterval(updateQueueUI, 5000); // update UI if modal open
 
     // Sync clock tick
     setInterval(() => syncTick(), 2000);

@@ -8,6 +8,7 @@
  *   /api/sync            → SHARED playback schedule + current song/position
  *   /stream/<songId>?start=<sec> → audio proxy (GitHub MP3, Range + seek)
  *   /api/presence        → POST heartbeat / leave (listening dashboard)
+ *   /api/groups          → grouped catalog (base titles, for future queue feature)
  *   /api/listeners       → GET active listeners (name/avatar + count)
  *   /api/chat            → POST message / GET history (paginated)
  *   /api/exchange        → Discord OAuth code → token (confidential client)
@@ -207,10 +208,6 @@ let schedCache = { at: 0, data: null };
 let durationsCache = { at: 0, data: null };
 let sizeCache = {}; // songId → content-length
 
-// Queue-next-song lock (first-come, first-served per round)
-let nextSongLockCache = { at: 0, data: null };
-const NEXT_SONG_TTL = 15000; // ms — re-fetch lock state at most this often
-
 async function readJson(url) {
   const res = await fetch(url);
   if (!res.ok) return null;
@@ -222,14 +219,6 @@ async function getDurations() {
   if (durationsCache.data && now - durationsCache.at < 60000) return durationsCache.data;
   const data = (await readJson(`${SOC_DB}/${SOC_NS}/durations.json`)) || {};
   durationsCache = { at: now, data };
-  return data;
-}
-
-async function getNextSongLock() {
-  const now = Date.now();
-  if (nextSongLockCache.data && now - nextSongLockCache.at < NEXT_SONG_TTL) return nextSongLockCache.data;
-  const data = (await readJson(`${SOC_DB}/${SOC_NS}/nextSongLock.json`)) || null;
-  if (data) nextSongLockCache = { at: now, data };
   return data;
 }
 
@@ -288,8 +277,11 @@ function schedulePosition(sched, durations, now) {
   for (let i = 0; i < groupIds.length; i++) {
     const id = groupIds[i];
     const d = durations[id] || DEFAULT_MS;
-    if (acc + d > elapsed) {
-      return { index: i, id, offsetMs: elapsed - acc, durationMs: d };
+    // Use >= so a song whose duration exactly equals the remaining elapsed
+    // doesn't fall through and get skipped (shortens the song).
+    if (acc + d >= elapsed) {
+      const offset = Math.max(0, elapsed - acc);
+      return { index: i, id, offsetMs: offset, durationMs: d };
     }
     acc += d;
   }
@@ -307,24 +299,8 @@ async function handleSync() {
     groups.forEach((g) => { byId[g.id] = g; });
     const cur = schedulePosition(sched, durations, now);
 
-    // Honor a queue lock: the locked song MUST be the very next song played,
-    // overriding the seeded rotation. Splice the locked group into the
-    // rotation right after the current song, then consume (clear) the lock
-    // so it only affects the the single upcoming transition.
-    const lock = await getNextSongLock();
-    let lockedSong = null;
+    // Rotation is the natural book order (Psalms → Song of Solomon).
     let rotationGroupIds = sched.groupIds.slice();
-    if (lock && lock.songId && byId[lock.songId]) {
-      const gIdx = rotationGroupIds.indexOf(lock.songId);
-      if (gIdx > -1) rotationGroupIds.splice(gIdx, 1); // remove from scheduled slot
-      // Insert right after the current song so it is unambiguously "next".
-      const insertAt = Math.min(cur.index + 1, rotationGroupIds.length);
-      rotationGroupIds.splice(insertAt, 0, lock.songId);
-      lockedSong = { songId: lock.songId, selectorUid: lock.uid, selectorName: lock.name || lock.uid };
-      // Consume the lock: it only governs the single upcoming transition.
-      await fetch(`${SOC_DB}/${SOC_NS}/nextSongLock.json`, { method: "DELETE" });
-      nextSongLockCache = { at: now, data: null };
-    }
 
     // Resolve each group to its chosen version for this loop (sync-safe).
     const rotation = rotationGroupIds.map((id) => {
@@ -343,8 +319,8 @@ async function handleSync() {
         durationMs: primaryDur,
       };
     });
-    // Recompute cur against the *adjusted* rotation (a lock may have shifted indices)
-    // so the client's position math stays aligned with the injected next-song.
+    // Recompute cur against the rotation so the client's position math
+    // stays aligned with the rotation indices.
     const curIdxInAdjusted = rotationGroupIds.indexOf(cur.id);
     const curAdj = curIdxInAdjusted > -1 ? { index: curIdxInAdjusted, id: cur.id, offsetMs: cur.offsetMs, durationMs: cur.durationMs } : cur;
     const curGroup = byId[curAdj.id] || { id: curAdj.id, title: curAdj.id, artist: "SGSS", category: "-", primaryId: curAdj.id, versions: [{ id: curAdj.id, url: "", title: curAdj.id }] };
@@ -360,7 +336,6 @@ async function handleSync() {
       loop,
       current: { ...curAdj, song: { id: curGroup.id, title: curGroup.title, artist: curGroup.artist, category: curGroup.category, url: cV.url, versionTitle: cV.title } },
       next: nextSong,
-      lockedSong,
       rotation,
       count: rotationGroupIds.length,
     });
@@ -406,7 +381,10 @@ async function handleStream(request, env, ctx, songId, url) {
     if (!range && startSec > 0) {
       const size = await getSize(song.url);
       if (size > 0) {
-        const ratio = Math.min(1, Math.max(0, startSec / (durationMs / 1000)));
+        // Seek to the requested start offset. Use the actual probed duration
+        // so we never cut a song short (clamp ratio to [0,1]).
+        const durationSec = (durations[group.primaryId] || DEFAULT_MS) / 1000;
+        const ratio = Math.min(1, Math.max(0, startSec / durationSec));
         const startByte = Math.round(ratio * (size - 1));
         range = `bytes=${startByte}-`;
       }
@@ -679,63 +657,6 @@ async function pruneChat() {
   } catch (e) { /* best-effort */ }
 }
 
-// Queue-next-song lock (first-come, first-served per round)
-async function handleNextSongGet() {
-  try {
-    const lock = await getNextSongLock();
-    if (!lock) return json({ locked: false });
-    // Prefer the name stored on the lock when it was set; fall back to the
-    // selector's live presence record, then to their uid.
-    let selectorName = lock.name;
-    if (!selectorName && lock.uid) {
-      const presence = (await readJson(`${SOC_DB}/${SOC_NS}/presence.json`)) || {};
-      for (const p of Object.values(presence)) {
-        if (p && p.uid === lock.uid && p.name) { selectorName = p.name; break; }
-      }
-    }
-    return json({ locked: true, songId: lock.songId, selectorUid: lock.uid, selectorName: selectorName || lock.uid });
-  } catch (err) {
-    return json({ error: err.message }, 502);
-  }
-}
-
-async function handleNextSongPost(request) {
-  try {
-    const body = await request.json().catch(() => ({}));
-    const songId = cleanStr(body.songId, 64);
-    if (!songId) return json({ error: "missing songId" }, 400);
-    const uid = cleanStr(body.uid, 64) || "anon";
-
-    const now = Date.now();
-    const name = cleanStr(body.name || "Guest", 40);
-    const lock = await getNextSongLock();
-    // If no lock exists, or the same user is trying to re-select, allow update.
-    if (!lock || lock.uid === uid) {
-      await fetch(`${SOC_DB}/${SOC_NS}/nextSongLock.json`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ songId, uid, name, ts: now }),
-      });
-      nextSongLockCache = { at: now, data: { songId, uid, name, ts: now } };
-      return json({ ok: true, locked: true });
-    }
-    // Lock already held by a different user.
-    return json({ ok: false, locked: true, reason: "locked by another user" }, 409);
-  } catch (err) {
-    return json({ error: "missing songId" }, 400);
-  }
-}
-
-async function handleNextSongDelete(request) {
-  try {
-    await fetch(`${SOC_DB}/${SOC_NS}/nextSongLock.json`, { method: "DELETE" });
-    nextSongLockCache = { at: Date.now(), data: null };
-    return json({ ok: true });
-  } catch (err) {
-    return json({ error: err.message }, 500);
-  }
-}
-
 // ── Discord OAuth exchange (confidential client) ─────────────────────────────
 async function handleExchange(request, env) {
   try {
@@ -791,17 +712,6 @@ export default {
       if (path === "/api/leaderboard") return await handleLeaderboard();
       if (path === "/api/chat" && request.method === "POST") {
         const r = await handleChatPost(request);
-        ctx.waitUntil(pruneChat());
-        return r;
-      }
-      if (path === "/api/next-song" && request.method === "GET") return await handleNextSongGet();
-      if (path === "/api/next-song" && request.method === "POST") {
-        const r = await handleNextSongPost(request);
-        ctx.waitUntil(pruneChat()); // also prune chat on next-song POST for consistency
-        return r;
-      }
-      if (path === "/api/next-song" && request.method === "DELETE") {
-        const r = await handleNextSongDelete(request);
         ctx.waitUntil(pruneChat());
         return r;
       }
