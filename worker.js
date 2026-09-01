@@ -821,7 +821,7 @@ export default {
       if (content !== undefined) {
         const ext = "." + (assetPath.split(".").pop() || "");
         return new Response(content, {
-          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" },
+          headers: { "Content-Type": CONTENT_TYPES[ext] || "text/plain; charset=utf-8", "Cache-Control": "no-cache" },
         });
       }
       return notFound();
